@@ -32,13 +32,7 @@ func (s *Stats) Record(r Result) {
 	// Failed Results' latencies are recorded too (k6/vegeta convention):
 	// timeouts and slow errors are part of the latency story. Values outside
 	// the histogram range are clamped, not dropped (Max keeps the true value).
-	v := int64(r.Latency / time.Microsecond)
-	if v < s.hist.LowestTrackableValue() {
-		v = s.hist.LowestTrackableValue()
-	}
-	if v > s.hist.HighestTrackableValue() {
-		v = s.hist.HighestTrackableValue()
-	}
+	v := min(max(int64(r.Latency/time.Microsecond), s.hist.LowestTrackableValue()), s.hist.HighestTrackableValue())
 	_ = s.hist.RecordValue(v)
 	if r.Latency > s.maxLat {
 		s.maxLat = r.Latency

@@ -17,7 +17,7 @@ func TestMixPicksAll(t *testing.T) {
 	b := RunnerFunc(func(context.Context) Result { return Result{Code: "b"} })
 	m := Mix(Weighted{a, 1}, Weighted{b, 1})
 	seen := map[string]bool{}
-	for i := 0; i < 500; i++ {
+	for range 500 {
 		seen[m.Do(context.Background()).Code] = true
 	}
 	if !seen["a"] || !seen["b"] {
@@ -31,7 +31,7 @@ func TestMixRespectsWeights(t *testing.T) {
 	m := Mix(Weighted{a, 9}, Weighted{b, 1})
 	counts := map[string]int{}
 	const draws = 2000
-	for i := 0; i < draws; i++ {
+	for range draws {
 		counts[m.Do(context.Background()).Code]++
 	}
 	// Binomial(2000, 0.9): mean 1800, sd ~13.4 — [1700, 1900] is ±7σ, so this

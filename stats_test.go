@@ -9,7 +9,7 @@ import (
 func TestStatsSnapshot(t *testing.T) {
 	s := NewStats()
 	base := time.Unix(0, 0)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		s.Record(Result{
 			Start:   base.Add(time.Duration(i) * time.Millisecond),
 			Latency: 10 * time.Millisecond,

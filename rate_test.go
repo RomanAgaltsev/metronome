@@ -61,12 +61,12 @@ func TestAdaptiveConcurrent(t *testing.T) {
 	a := NewAdaptive(1)
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < 1000; i++ {
+		for i := range 1000 {
 			a.SetRate(float64(i))
 		}
 		close(done)
 	}()
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		_ = a.Rate(0)
 	}
 	<-done
