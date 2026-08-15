@@ -45,3 +45,29 @@ func TestPhasedRate(t *testing.T) {
 		t.Fatal("past the end should hold the last phase rate")
 	}
 }
+
+func TestAdaptiveSetRate(t *testing.T) {
+	a := NewAdaptive(10)
+	if a.Rate(0) != 10 {
+		t.Fatal("initial rate should be 10")
+	}
+	a.SetRate(42.5)
+	if a.Rate(time.Second) != 42.5 {
+		t.Fatal("SetRate should update the reported rate")
+	}
+}
+
+func TestAdaptiveConcurrent(t *testing.T) {
+	a := NewAdaptive(1)
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 1000; i++ {
+			a.SetRate(float64(i))
+		}
+		close(done)
+	}()
+	for i := 0; i < 1000; i++ {
+		_ = a.Rate(0)
+	}
+	<-done
+}

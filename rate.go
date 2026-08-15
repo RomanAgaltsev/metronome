@@ -1,6 +1,10 @@
 package metronome
 
-import "time"
+import (
+	"math"
+	"sync/atomic"
+	"time"
+)
 
 // RateController decides the target rate (requests/sec) over elapsed time.
 type RateController interface {
@@ -49,4 +53,24 @@ func (p Phased) Rate(elapsed time.Duration) float64 {
 		return 0
 	}
 	return p.Phases[len(p.Phases)-1].TargetRPS
+}
+
+// Adaptive is a RateController whose rate is set externally.
+// Safe for concurrent SetRate/Rate.
+type Adaptive struct {
+	rps atomic.Uint64 // stores math.Float64bits
+}
+
+func NewAdaptive(initial float64) *Adaptive {
+	a := &Adaptive{}
+	a.SetRate(initial)
+	return a
+}
+
+func (a *Adaptive) SetRate(rps float64) {
+	a.rps.Store(math.Float64bits(rps))
+}
+
+func (a *Adaptive) Rate(time.Duration) float64 {
+	return math.Float64frombits(a.rps.Load())
 }
