@@ -5,12 +5,14 @@ vars:
   GOLANGCI_LINT_VERSION: "v2.12.2"
   GCI_VERSION: "v0.14.0"
   GOFUMPT_VERSION: "v0.10.0"
+  KEEL_VERSION: "v2.4.1"
 
   BIN_DIR: '{{.ROOT_DIR | replace "\\" "/"}}/bin'
   EXE_EXT: '{{if eq OS "windows"}}.exe{{end}}'
   GOLANGCI_LINT: "{{.BIN_DIR}}/golangci-lint{{.EXE_EXT}}"
   GCI: "{{.BIN_DIR}}/gci{{.EXE_EXT}}"
   GOFUMPT: "{{.BIN_DIR}}/gofumpt{{.EXE_EXT}}"
+  KEEL: '{{.BIN_DIR}}/keel{{.EXE_EXT}}'
 
 tasks:
   default:
@@ -38,9 +40,16 @@ tasks:
     status:
       - test -f {{.GOLANGCI_LINT}}
 
+  keel:install:
+    desc: install the pinned keel into ./bin
+    cmds:
+      - GOBIN={{.BIN_DIR}} go install github.com/RomanAgaltsev/keel/v2/cmd/keel@{{.KEEL_VERSION}}
+    status:
+      - test -f {{.KEEL}}
+
   setup:
     desc: install all tools
-    deps: [formatters:install, golangci-lint:install]
+    deps: [formatters:install, golangci-lint:install, keel:install]
 
   format:
     desc: format code (gofumpt + gci)
@@ -89,9 +98,11 @@ tasks:
   keel:outdated:
     desc: report modules and pinned tools this repo has drifted behind
     cmds: ["keel outdated"]
+
   keel:update:
     desc: re-apply scaffold templates (writes files — review the diff)
     cmds: ["keel update"]
+
   keel:settings:
     desc: check the remote's settings against .github/keel-settings.yml
     cmds: ["keel settings apply --check"]

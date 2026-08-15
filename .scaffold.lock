@@ -129,7 +129,7 @@ answers:
     enable_govulncheck: true
     license: MIT
     module_path: github.com/RomanAgaltsev/metronome
-    provider: none
+    provider: github
     repo_name: metronome
     visibility: public
     year: 2026
