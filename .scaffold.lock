@@ -1,0 +1,135 @@
+lock_version: 2
+keel_version: dev
+recipe: go-library
+modules:
+    - name: base-layout
+      source: builtin
+      version: 2.1.0
+      files:
+        - path: .gitignore
+          sha256: 20b8cf41eeea8f58a4c6912566959fe09c2e521310d0e113d9673c2e0ab3d06b
+        - path: README.md
+          sha256: e47b894edff53a004e0e0e6e27c11751fd72834080ad41ad5b3fac23f34d8843
+    - name: go-mod
+      source: builtin
+      version: 2.1.0
+      files:
+        - path: doc.go
+          sha256: 4df4f5d5a4c5fa1862e2b2c3bd717fad3b80ade69ef7f590e2ce719b8b2a8f0f
+        - path: go.mod
+          sha256: 6d17c8e879cb66d009cf66f6760041cca1010ff98cc61d49f75f332978d3ef6e
+        - path: metronome.go
+          sha256: 513a280cc9f3cbbffcf78033786cf7e2d263c25020e75e19509220387f93bf82
+        - path: metronome_test.go
+          sha256: 126d5b9a47cb2c192fa8a2e6781ee1e01b0e0a0c3e0443f1578532b902f9497f
+    - name: taskfile-go
+      source: builtin
+      version: 2.2.0
+      files:
+        - path: Taskfile.yml
+          sha256: 0e0b72bf3fbebcf9f07d9725f0c4a1d23a4d7e0d8815a422ae2d3feda3fdd4c4
+    - name: lint-go
+      source: builtin
+      version: 2.1.0
+      files:
+        - path: .github/workflows/lint.yml
+          sha256: c84a88fa4f5b9753229a29d85568c280a17e0a3bb754f2e236722b032f618cc5
+        - path: .golangci.yml
+          sha256: 194b6bc5f6e4da60237a0428903be19c6f29444483a376417368297fce84cea8
+    - name: test-go
+      source: builtin
+      version: 2.1.0
+      files:
+        - path: .github/workflows/test.yml
+          sha256: 427be3cf378146e695a47c397506a9e9627539abb609e1291c28ac5a8ec53d26
+    - name: security-go
+      source: builtin
+      version: 2.1.0
+      files:
+        - path: .github/codeql/codeql-config.yml
+          sha256: a259494ff20a25d7c103ca276733fc28c65d870d533270fbe3f9997d0e84261c
+        - path: .github/workflows/security.yml
+          sha256: 2dfd8abb0a99135e0f85d80780c0dd3906c7e99e4ca10c1c2dcbfd3c83b55cae
+    - name: dep-bots-go
+      source: builtin
+      version: 1.0.1
+      files:
+        - path: .github/dependabot.yml
+          sha256: 6d644e8eeb4f6cacfb1061a792c36441c8eb6db8badbc2550820d4bf27224216
+    - name: release-go
+      source: builtin
+      version: 2.2.0
+      files:
+        - path: .github/workflows/pr-title.yml
+          sha256: 42a94378eb2ad9b562707d7fafcd674c4d44296c8a7bbc23a9f5e85cf5375075
+        - path: .github/workflows/release.yml
+          sha256: 9e4f1c70978f9b6fc5ea8c7dc53210f20841ef978b79c3d74db0cec2275303e2
+        - path: .release-please-manifest.json
+          sha256: f3c5933fad3423de6ce5fecec931a5173ef9a006702dc468ea9b0887158c55b5
+        - path: release-please-config.json
+          sha256: bd8ede06eeb7f05afb2f9610672a4c3e6db6ed1dffaf2fd287883797e56d24ca
+    - name: spell
+      source: builtin
+      version: 1.1.0
+      files:
+        - path: .github/workflows/typos.yml
+          sha256: a6012534570fa4a98b06135f7404e50a07c11e1b519744fa77f4936522ccebfd
+        - path: .typos.toml
+          sha256: 5b45568d22482d075d6506357b9833b0d041007b049efbce71ab84e08ceafa59
+    - name: license
+      source: builtin
+      version: 1.0.0
+      files:
+        - path: LICENSE
+          sha256: 9213682d939d823a0f2f4126910213f9aebe9cb3ae4b9c401869d4e630a212b7
+    - name: governance
+      source: builtin
+      version: 1.0.0
+      files:
+        - path: .editorconfig
+          sha256: d3801db0999166abe4b72e4811afff94f93e15ab1ed41f2e12bd953acfb64c81
+        - path: .github/CODEOWNERS
+          sha256: d2abd2be83e9ac6cdf2775f54a69c291371da72f2e1ea52968851b25f0ac66d4
+        - path: SECURITY.md
+          sha256: 365c2dd253df583be48cd5e5d6870d5f7ba0befc943c125316380068e6d143c6
+    - name: contributing-go
+      source: builtin
+      version: 1.4.0
+      files:
+        - path: CONTRIBUTING.md
+          sha256: 70d133cd882f18708d87d26eddbf4382fc29743bfd4868a81ed8c466bdb539c9
+    - name: community-templates
+      source: builtin
+      version: 1.0.0
+      files:
+        - path: .github/ISSUE_TEMPLATE/bug_report.yml
+          sha256: 2a139d4be087dde95fc57e4c1d1c76382059fe0a0b606d3c8831e07f9d6de62b
+        - path: .github/ISSUE_TEMPLATE/config.yml
+          sha256: 663aa5d81cfa9ce9100142620351ed06d9e9fad4a286fee788f0fc7fa6b65c37
+        - path: .github/ISSUE_TEMPLATE/feature_request.yml
+          sha256: 9d7f553105e339d71b14a2723aeb9a00368c36ca953e01fc84b2f395fab7bb3a
+        - path: .github/PULL_REQUEST_TEMPLATE.md
+          sha256: e07baf62d59e7cce84e6e864b674ab3ce7dcc4ede430cca6439d6a2ba2228447
+    - name: repo-settings-go
+      source: builtin
+      version: 1.0.0
+      files:
+        - path: .github/keel-settings.yml
+          sha256: a33f29379840ab56be6cb246a83b6b8fa20a3b039d1562cafc251b397eb9f6db
+answers:
+    archetype: library
+    author_email: roman-agalcev@yandex.ru
+    author_name: Roman Agaltsev
+    code_owner: RomanAgaltsev
+    create_remote: false
+    dep_bot: dependabot
+    description: A protocol-agnostic Go load kernel
+    enable_codecov: false
+    enable_codeql: true
+    enable_govulncheck: true
+    license: MIT
+    module_path: github.com/RomanAgaltsev/metronome
+    provider: none
+    repo_name: metronome
+    visibility: public
+    year: 2026

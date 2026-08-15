@@ -1,0 +1,152 @@
+version: "2"
+
+run:
+  timeout: 5m
+  relative-path-mode: gomod
+  issues-exit-code: 1
+  tests: true
+  modules-download-mode: readonly
+
+output:
+  formats:
+    text:
+      print-linter-name: true
+      print-issued-lines: true
+      colors: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: true
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - gocritic
+    - revive
+    - gosec
+    - depguard
+    - bodyclose
+    - noctx
+    - containedctx
+    - cyclop
+    - gocognit
+    - funlen
+    - nakedret
+    - errorlint
+    - errname
+    - perfsprint
+    - prealloc
+    - copyloopvar
+    - intrange
+    - exptostd
+    - asciicheck
+    - dupl
+    - unparam
+    - forbidigo
+    - usestdlibvars
+    - mirror
+    - nolintlint
+    - godox
+    - testifylint
+    - sloglint
+
+  disable:
+    - gocyclo
+    - lll
+    - contextcheck
+    - err113
+    - varnamelen
+    - nlreturn
+    - wsl
+    - wrapcheck
+
+  exclusions:
+    generated: strict
+    presets:
+      - std-error-handling
+      - common-false-positives
+    rules:
+      - path: _test\.go
+        linters:
+          - cyclop
+          - gocognit
+          - dupl
+          - gosec
+          - funlen
+          - wrapcheck
+          - noctx
+          - containedctx
+          - testifylint
+          - unparam
+
+  settings:
+    gosec:
+      config:
+        global:
+          audit: true
+          show-ignored: true
+        severity: "medium"
+        confidence: "medium"
+      excludes:
+        - G102
+
+    cyclop:
+      max-complexity: 20
+
+    gocognit:
+      min-complexity: 20
+
+    funlen:
+      lines: 100
+      statements: 50
+
+    nakedret:
+      max-func-lines: 30
+
+    depguard:
+      rules:
+        Main:
+          files:
+            - $all
+          allow:
+            - $gostd
+            - "github.com/RomanAgaltsev/metronome"
+
+    revive:
+      severity: warning
+
+    perfsprint:
+      int-conversion: true
+      err-error: true
+      errorf: true
+      sprintf1: true
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+    forbidigo:
+      exclude-godoc-examples: true
+      analyze-types: true
+
+    godox:
+      keywords:
+        - TODO
+        - FIXME
+        - BUG
+        - HACK
+
+formatters:
+  enable:
+    - gofumpt
+    - gci
+  settings:
+    gofumpt:
+      extra-rules: true
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/RomanAgaltsev/metronome)
+      no-inline-comments: false

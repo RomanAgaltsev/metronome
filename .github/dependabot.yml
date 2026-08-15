@@ -1,0 +1,12 @@
+# NOTE: Dependabot updates Go modules, GitHub Actions, and docker tags, but it
+# does NOT track the golangci-lint version pinned as a string in Taskfile.yml /
+# .github/workflows/lint.yml. Renovate (the keel default) does. To check those,
+# run `keel outdated`.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule: { interval: weekly }
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly }

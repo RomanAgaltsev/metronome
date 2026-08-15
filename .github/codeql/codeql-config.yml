@@ -1,0 +1,3 @@
+name: metronome CodeQL config
+queries:
+  - uses: security-extended

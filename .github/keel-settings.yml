@@ -1,0 +1,56 @@
+# Desired state for this repository's settings on the remote host.
+#
+# Apply it with:   keel settings apply
+# Check for drift: keel settings apply --check
+#
+# Only the keys named here are converged; anything omitted is left alone, so this
+# file is safe to run against a repo you have also tuned by hand.
+#
+# The required_status_checks list below matches the workflows this recipe's
+# modules emit. If you remove a discipline module, remove its check here too — a
+# required check that never reports blocks every pull request.
+version: 1
+
+repository:
+  allow_squash_merge: true
+  allow_merge_commit: false
+  allow_rebase_merge: false
+  allow_auto_merge: true
+  delete_branch_on_merge: true
+  has_wiki: false
+  has_projects: false
+
+security:
+  dependency_graph: true
+  dependabot_alerts: true
+  dependabot_security_updates: true
+  # Secret scanning is unavailable on private repos without GitHub Advanced
+  # Security, so it is declared only when this repo is public.
+  secret_scanning: true
+  secret_scanning_push_protection: true
+  private_vulnerability_reporting: true
+
+actions:
+  allowed: local_and_verified
+  default_workflow_permissions: read
+  can_approve_pull_request_reviews: false
+
+rulesets:
+  - name: "keel: main"
+    target: branch
+    ref: main
+    required_status_checks:
+      - lint
+      - test
+      - typos
+      - pr-title
+      - dependency-review
+      - actionlint
+      - codeql
+      - govulncheck
+    required_approving_reviews: 0
+    required_linear_history: true
+    block_force_push: true
+    block_deletion: true
+    bypass:
+      - repo_admin
