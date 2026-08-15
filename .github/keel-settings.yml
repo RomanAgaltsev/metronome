@@ -31,7 +31,16 @@ security:
   private_vulnerability_reporting: true
 
 actions:
-  allowed: local_and_verified
+  # `local_and_verified` blocks the third-party actions this repo's own workflows
+  # use — arduino/setup-task (lint), crate-ci/typos (typos),
+  # amannn/action-semantic-pull-request (pr-title), docker://rhysd/actionlint
+  # (security) and googleapis/release-please-action (release). Applying it gave
+  # every one of those a `startup_failure`, which — since the ruleset below
+  # requires their checks — made the repo unmergeable.
+  #
+  # keel's schema has no `patterns_allowed`, so an allow-list of just those five
+  # cannot be expressed; `all` is the only working value today.
+  allowed: all
   default_workflow_permissions: read
   can_approve_pull_request_reviews: false
 
