@@ -52,7 +52,7 @@ func (d *Driver) Run(ctx context.Context) <-chan Result {
 	// stopCtx releases workers blocked in lim.Wait once MaxRequests is
 	// exhausted. The send path below deliberately selects on the parent ctx,
 	// NOT stopCtx - exhaustion must never drop an already-produced Result
-	// (selecting on the same ctx that exhaustion cancels wuold randomly lose
+	// (selecting on the same ctx that exhaustion cancels would randomly lose
 	// the final results when both select cases are ready).
 	stopCtx, stop := context.WithCancel(ctx)
 
@@ -61,7 +61,6 @@ func (d *Driver) Run(ctx context.Context) <-chan Result {
 
 	// Rate updater.
 	wg.Go(func() {
-
 		t := time.NewTicker(100 * time.Millisecond)
 		defer t.Stop()
 

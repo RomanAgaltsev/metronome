@@ -12,7 +12,7 @@ type Result struct {
 	Labels  map[string]string // e.g. {"endpoint": "get_user"} for breakdown
 }
 
-// Sucess reports whether the unit of work completed without error.
+// Success reports whether the unit of work completed without error.
 func (r Result) Success() bool { return r.Err == nil }
 
 // Snapshot is an aggregated view of many Results over a window.
