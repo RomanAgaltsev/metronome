@@ -50,7 +50,13 @@ rulesets:
     ref: main
     required_status_checks:
       - lint
-      - test
+      # test.yml runs a three-OS matrix, so GitHub reports `test (<os>)` and never
+      # a bare `test`. keel's template requires `test`, which nothing produces —
+      # the check stayed pending forever and blocked this PR with all 11 runs
+      # green. See RomanAgaltsev/keel#53.
+      - test (ubuntu-latest)
+      - test (macos-latest)
+      - test (windows-latest)
       - typos
       - pr-title
       - dependency-review
