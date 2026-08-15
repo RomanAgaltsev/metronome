@@ -1,0 +1,108 @@
+version: "3"
+
+vars:
+  GO_VERSION: "1.26"
+  GOLANGCI_LINT_VERSION: "v2.12.2"
+  GCI_VERSION: "v0.14.0"
+  GOFUMPT_VERSION: "v0.10.0"
+  KEEL_VERSION: "v2.4.1"
+
+  BIN_DIR: '{{.ROOT_DIR | replace "\\" "/"}}/bin'
+  EXE_EXT: '{{if eq OS "windows"}}.exe{{end}}'
+  GOLANGCI_LINT: "{{.BIN_DIR}}/golangci-lint{{.EXE_EXT}}"
+  GCI: "{{.BIN_DIR}}/gci{{.EXE_EXT}}"
+  GOFUMPT: "{{.BIN_DIR}}/gofumpt{{.EXE_EXT}}"
+  KEEL: '{{.BIN_DIR}}/keel{{.EXE_EXT}}'
+
+tasks:
+  default:
+    desc: list available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  formatters:install:
+    desc: install gofumpt and gci
+    cmds:
+      - echo 'Installing gofumpt...'
+      - "GOBIN={{.BIN_DIR}} go install mvdan.cc/gofumpt@{{.GOFUMPT_VERSION}}"
+      - echo 'Installing gci...'
+      - "GOBIN={{.BIN_DIR}} go install github.com/daixiang0/gci@{{.GCI_VERSION}}"
+    status:
+      - test -f {{.GOFUMPT}}
+      - test -f {{.GCI}}
+
+  golangci-lint:install:
+    desc: install golangci-lint
+    cmds:
+      - echo 'Installing golangci-lint...'
+      - GOBIN={{.BIN_DIR}} go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLANGCI_LINT_VERSION}}
+    status:
+      - test -f {{.GOLANGCI_LINT}}
+
+  keel:install:
+    desc: install the pinned keel into ./bin
+    cmds:
+      - GOBIN={{.BIN_DIR}} go install github.com/RomanAgaltsev/keel/v2/cmd/keel@{{.KEEL_VERSION}}
+    status:
+      - test -f {{.KEEL}}
+
+  setup:
+    desc: install all tools
+    deps: [formatters:install, golangci-lint:install, keel:install]
+
+  format:
+    desc: format code (gofumpt + gci)
+    deps: [formatters:install]
+    cmds:
+      - echo 'Formatting code with gofumpt...'
+      - bash -c "find . -type f -name '*.go' -exec {{.GOFUMPT}} -extra -w {} +"
+      - echo 'Sorting imports with gci...'
+      - bash -c "find . -type f -name '*.go' -exec {{.GCI}} write -s standard -s default -s 'prefix(github.com/RomanAgaltsev/metronome)' {} +"
+
+  lint:
+    desc: run golangci-lint
+    deps: [golangci-lint:install]
+    cmds:
+      - "{{.GOLANGCI_LINT}} run --allow-parallel-runners ./... --config=.golangci.yml"
+
+  vet:
+    desc: go vet ./...
+    cmds:
+      - go vet ./...
+
+  test:
+    desc: race + shuffled tests
+    cmds:
+      - go test -race -shuffle=on ./...
+
+  cover:
+    desc: coverage profile
+    cmds:
+      - go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+  deps:update:
+    desc: update deps
+    cmds:
+      - echo 'Updating deps...'
+      - go mod tidy -compat={{.GO_VERSION}}
+
+  ci:
+    desc: full local gate (what CI runs)
+    cmds:
+      - task: deps:update
+      - task: vet
+      - task: lint
+      - task: test
+
+  keel:outdated:
+    desc: report modules and pinned tools this repo has drifted behind
+    cmds: ["keel outdated"]
+
+  keel:update:
+    desc: re-apply scaffold templates (writes files — review the diff)
+    cmds: ["keel update"]
+
+  keel:settings:
+    desc: check the remote's settings against .github/keel-settings.yml
+    cmds: ["keel settings apply --check"]

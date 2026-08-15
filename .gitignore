@@ -1,0 +1,14 @@
+/bin/
+/dist/
+/target/
+
+# Test and coverage output
+coverage.out
+coverage.html
+
+# Design docs live in the private docs vault, never in a public code repo.
+/docs/
+
+# OS and editor cruft
+.DS_Store
+Thumbs.db
