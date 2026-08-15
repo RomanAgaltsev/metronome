@@ -42,7 +42,14 @@ actions:
   # cannot be expressed; `all` is the only working value today.
   allowed: all
   default_workflow_permissions: read
-  can_approve_pull_request_reviews: false
+  # release-please opens its release PR with the default GITHUB_TOKEN, so it needs
+  # this on: with `false` it dies on "GitHub Actions is not permitted to create or
+  # approve pull requests". GitHub bundles create and approve under one flag, so
+  # allowing the release PR also allows Actions to approve PRs — harmless while
+  # required_approving_reviews is 0. If that is ever raised, switch
+  # release-please to a PAT/App token and set this back to false.
+  # See RomanAgaltsev/keel#54.
+  can_approve_pull_request_reviews: true
 
 rulesets:
   - name: "keel: main"
