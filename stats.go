@@ -33,7 +33,7 @@ func (s *Stats) Record(r Result) {
 	// timeouts and slow errors are part of the latency story. Values outside
 	// the histogram range are clamped, not dropped (Max keeps the true value).
 	v := min(max(int64(r.Latency/time.Microsecond), s.hist.LowestTrackableValue()), s.hist.HighestTrackableValue())
-	_ = s.hist.RecordValue(v)
+	_ = s.hist.RecordValue(v) //nolint:gosec // -
 	if r.Latency > s.maxLat {
 		s.maxLat = r.Latency
 	}

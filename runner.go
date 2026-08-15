@@ -36,7 +36,7 @@ func Mix(ws ...Weighted) Runner {
 		panic("metronome: Mix requires at least one Weighted with a positive Weight")
 	}
 	return RunnerFunc(func(ctx context.Context) Result {
-		n := rand.IntN(total)
+		n := rand.IntN(total) //nolint:gosec // -
 		for _, w := range ws {
 			n -= w.Weight
 			if n < 0 {

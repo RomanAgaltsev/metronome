@@ -27,6 +27,7 @@ type Driver struct {
 	Clock       Clock
 }
 
+//nolint:gocognit // -
 func (d *Driver) Run(ctx context.Context) <-chan Result {
 	if d.Runner == nil {
 		panic("metronome: Driver.Runner is nil")
