@@ -1,7 +1,21 @@
 # metronome
 
 [![CI](https://github.com/RomanAgaltsev/metronome/actions/workflows/test.yml/badge.svg)](https://github.com/RomanAgaltsev/metronome/actions/workflows/test.yml)
+[![Coverage](https://img.shields.io/badge/coverage-98%25-brightgreen)](https://github.com/RomanAgaltsev/metronome/actions/workflows/test.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/RomanAgaltsev/metronome.svg)](https://pkg.go.dev/github.com/RomanAgaltsev/metronome)
+
+<!--
+The coverage badge is static: CI computes coverage on three OSes but publishes it
+nowhere, and test.yml is keel-owned, so wiring a live badge would mean either a
+permanent `keel update` conflict or a third-party service. Refresh it by hand when
+it moves, using the same command CI runs:
+
+    go test -covermode=atomic -coverprofile=coverage.out ./... && go tool cover -func=coverage.out | tail -1
+
+It is quoted to the nearest whole percent on purpose: the timing-sensitive
+saturation branches make the exact figure vary by a few tenths between runs.
+-->
+
 
 A protocol-agnostic Go **load kernel**: drive a unit of work at a controlled,
 live-adjustable rate across N workers, and measure latency and errors.
@@ -68,6 +82,7 @@ abandoning a live channel leaks the workers.
 | `Stats` / `Snapshot` | HDR-histogram percentiles, error rate, achieved rps, bytes/codes |
 | `Snapshot.Saturated` | how much of the error rate was the target refusing work |
 | `Snapshot.MaxScheduleLag` | how far the generator itself fell behind its own schedule |
+| `Snapshot.String()` | the numbers a run is judged on, in the order to read them |
 | `Snapshot.Corrected*` | coordinated-omission-corrected percentiles (see the caveat below) |
 | `Clock` / `ManualClock` | injected time, for deterministic tests |
 
@@ -176,10 +191,10 @@ go test -run '^$' -bench BenchmarkDriverPaced -benchtime 3x ./...
 ```
 
 Per-request kernel overhead (no-op `Runner`, unlimited rate, `Workers = GOMAXPROCS`):
-**425 ns/op** closed-loop and **752 ns/op** open-loop, i.e. a plumbing ceiling near
-**2.3M rps** and **1.3M rps** respectively. Note the gap between that ceiling and the
+**600 ns/op** closed-loop and **895 ns/op** open-loop, i.e. a plumbing ceiling near
+**1.7M rps** and **1.1M rps** respectively. Note the gap between that ceiling and the
 5,000 rps adherence figure above: metronome's limit at realistic rates is sleep
-granularity, not CPU. `Stats.Record` costs **193 ns/op** under full contention.
+granularity, not CPU. `Stats.Record` costs **211 ns/op** under full contention.
 Reproduce with:
 
 ```bash
