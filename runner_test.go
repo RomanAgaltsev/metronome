@@ -62,3 +62,21 @@ func TestMixRejectsBadInput(t *testing.T) {
 		})
 	}
 }
+
+func TestMixClonesItsInput(t *testing.T) {
+	a := RunnerFunc(func(context.Context) Result { return Result{Code: "a"} })
+	b := RunnerFunc(func(context.Context) Result { return Result{Code: "b"} })
+
+	ws := []Weighted{{a, 1}, {b, 1}}
+	m := Mix(ws...)
+	ws[0].Weight = 1_000_000 // the caller mutates the slice it still holds
+
+	counts := map[string]int{}
+	for range 1000 {
+		counts[m.Do(context.Background()).Code]++
+	}
+	// Still 1:1 — Mix must be immune to post-construction mutation.
+	if counts["a"] < 400 || counts["a"] > 600 {
+		t.Fatalf("a=%d of 1000 (want ~500); Mix aliased the caller's slice", counts["a"])
+	}
+}

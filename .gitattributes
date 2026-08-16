@@ -1,0 +1,12 @@
+# Keep the working tree LF on every platform.
+#
+# Without this, core.autocrlf=true on Windows produces a CRLF working tree while
+# gci and gofumpt normalise to LF — so `task lint` reports every Go file as
+# unformatted locally while CI (which checks out on Linux) reports none of it.
+# A quality gate that is always red gets ignored, which is how a real finding
+# gets missed.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
