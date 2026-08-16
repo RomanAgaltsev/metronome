@@ -3,7 +3,9 @@ package metronome
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -525,5 +527,35 @@ func TestOpenLoopSaturationIsMeasuredNotHidden(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the run never finished")
+	}
+}
+
+// TestPacingAdherence asserts the achieved rate is within ±5% of the offered
+// rate. It is env-gated because it needs an idle machine: on a busy CI runner it
+// measures the runner, not metronome. Run it deliberately:
+//
+//	METRONOME_PACING_TEST=1 go test -run TestPacingAdherence -v ./...
+func TestPacingAdherence(t *testing.T) {
+	if os.Getenv("METRONOME_PACING_TEST") != "1" {
+		t.Skip("set METRONOME_PACING_TEST=1 to run (needs an idle machine)")
+	}
+	for _, rps := range []float64{10, 100, 1000} {
+		t.Run(fmt.Sprintf("%.0frps", rps), func(t *testing.T) {
+			d := Driver{
+				Runner:      RunnerFunc(func(context.Context) Result { return Result{} }),
+				Rate:        Constant(rps),
+				Workers:     runtime.GOMAXPROCS(0),
+				MaxRequests: int(rps * 2), // two seconds of load
+			}
+			s := NewStats()
+			for r := range d.Run(context.Background()) {
+				s.Record(r)
+			}
+			got := s.Snapshot().RPS
+			if math.Abs(got-rps)/rps > 0.05 {
+				t.Fatalf("offered %.0f rps, achieved %.1f rps (%.1f%% off, want within 5%%)",
+					rps, got, math.Abs(got-rps)/rps*100)
+			}
+		})
 	}
 }
