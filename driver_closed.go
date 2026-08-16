@@ -14,7 +14,8 @@ import "context"
 // final results whenever both select cases are ready.
 func (d *Driver) runClosedLoopWorker(ctx, stopCtx context.Context, stop context.CancelFunc, cfg runConfig, out chan<- Result) {
 	for {
-		if err := cfg.lim.Wait(stopCtx); err != nil {
+		scheduled, err := cfg.pacer.next(stopCtx)
+		if err != nil {
 			return
 		}
 		n := cfg.claimed.Add(1)
@@ -23,6 +24,7 @@ func (d *Driver) runClosedLoopWorker(ctx, stopCtx context.Context, stop context.
 			return
 		}
 		res := safeDo(ctx, d.Runner, cfg.clock)
+		res.Scheduled = scheduled
 		select {
 		case out <- res:
 			if d.MaxRequests > 0 && n == int64(d.MaxRequests) {

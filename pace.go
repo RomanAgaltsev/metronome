@@ -1,7 +1,10 @@
 package metronome
 
 import (
+	"context"
+	"errors"
 	"math"
+	"time"
 
 	"golang.org/x/time/rate"
 )
@@ -35,4 +38,47 @@ func sanitizeRate(rps float64) rate.Limit {
 	default:
 		return rate.Limit(rps)
 	}
+}
+
+// pacer converts a rate limit into scheduled send times. It exists so that the
+// *ideal* send time is knowable — lim.Wait only tells you when it returned, not
+// when it should have — and so that the waiting happens on the injected Clock,
+// which is what makes pacing tests deterministic.
+type pacer struct {
+	lim   *rate.Limiter
+	clock Clock
+}
+
+func newPacer(clock Clock, rps float64, burst int) *pacer {
+	if burst <= 0 {
+		burst = 1
+	}
+	return &pacer{lim: rate.NewLimiter(sanitizeRate(rps), burst), clock: clock}
+}
+
+// next blocks until the next unit of work is due and returns the time it was
+// due — which is not the same as the time next returned, and that difference is
+// the point. It returns ctx.Err() if ctx is done first, cancelling the
+// reservation so the token is not lost.
+func (p *pacer) next(ctx context.Context) (time.Time, error) {
+	now := p.clock.Now()
+	rsv := p.lim.ReserveN(now, 1)
+	if !rsv.OK() {
+		// Only possible with burst < 1, which newPacer prevents.
+		return time.Time{}, errors.New("metronome: rate limiter burst is too small for one event")
+	}
+
+	delay := rsv.DelayFrom(now)
+	scheduled := now.Add(delay)
+	if err := p.clock.Sleep(ctx, delay); err != nil {
+		rsv.CancelAt(p.clock.Now())
+		return time.Time{}, err
+	}
+	return scheduled, nil
+}
+
+// setRate applies a new limit as of now. It takes the time explicitly so the
+// limiter stays on the injected Clock rather than falling back to time.Now.
+func (p *pacer) setRate(now time.Time, rps float64) {
+	p.lim.SetLimitAt(now, sanitizeRate(rps))
 }

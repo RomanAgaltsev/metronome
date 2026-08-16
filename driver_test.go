@@ -285,32 +285,62 @@ func TestDriverClosesPromptlyOnCancel(t *testing.T) {
 	}
 }
 
-// H1: injecting a ManualClock does NOT make pacing deterministic in this
-// version — the Clock feeds only Rate(elapsed), so an un-advanced ManualClock
-// pins the rate at Rate(0) while the limiter keeps running on wall time. This
-// test pins that behaviour so the v0.2 change to it is visible, not accidental.
-func TestDriverManualClockPinsRateAtZeroElapsed(t *testing.T) {
-	if testing.Short() {
-		t.Skip("timing-sensitive")
-	}
-	mc := NewManualClock(time.Unix(0, 0))
+func TestDriverStampsScheduled(t *testing.T) {
 	d := Driver{
-		Runner:      RunnerFunc(func(context.Context) Result { return Result{Start: time.Now()} }),
-		Rate:        Ramp{Start: 1, End: 10000, Over: 100 * time.Millisecond},
+		Runner:      RunnerFunc(func(context.Context) Result { return Result{Start: time.Now(), Latency: time.Millisecond} }),
+		Rate:        Constant(500),
 		Workers:     2,
 		MaxRequests: 20,
-		Clock:       mc,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	defer cancel()
+	for r := range d.Run(context.Background()) {
+		if r.Scheduled.IsZero() {
+			t.Fatal("every Result must carry its scheduled send time")
+		}
+		if r.Start.Before(r.Scheduled.Add(-50 * time.Millisecond)) {
+			t.Fatalf("Start %v is implausibly far before Scheduled %v", r.Start, r.Scheduled)
+		}
+	}
+}
 
-	n := 0
-	for range d.Run(ctx) {
-		n++
+// The v0.2 replacement for TestDriverManualClockPinsRateAtZeroElapsed (H1):
+// pacing is now exact under a ManualClock, with no wall-clock tolerance.
+func TestDriverPacesDeterministically(t *testing.T) {
+	m := NewManualClock(time.Unix(0, 0))
+	d := Driver{
+		Runner:  RunnerFunc(func(context.Context) Result { return Result{Latency: time.Millisecond} }),
+		Rate:    Constant(10), // one unit per 100ms
+		Workers: 1,
+		Clock:   m,
 	}
-	if n >= 20 {
-		t.Fatal("the Ramp advanced under a frozen ManualClock — pacing became Clock-driven; " +
-			"update this test and the Driver.Clock doc comment (see v0.2 task 11)")
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := d.Run(ctx)
+
+	var stamps []time.Time
+	for range 3 {
+		// The worker (after the first, immediate token) and the rate updater are
+		// both asleep on this clock at 100ms boundaries.
+		if len(stamps) > 0 {
+			m.BlockUntilSleepers(2)
+			m.Advance(100 * time.Millisecond)
+		}
+		select {
+		case r, ok := <-ch:
+			if !ok {
+				t.Fatal("channel closed early")
+			}
+			stamps = append(stamps, r.Scheduled)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no result after %d stamps", len(stamps))
+		}
 	}
-	t.Logf("frozen ManualClock delivered %d of 20 at the ramp's opening rate, as documented", n)
+
+	for i := 1; i < len(stamps); i++ {
+		if gap := stamps[i].Sub(stamps[i-1]); gap != 100*time.Millisecond {
+			t.Fatalf("scheduled gap %d = %v, want exactly 100ms (stamps: %v)", i, gap, stamps)
+		}
+	}
+
+	cancel()
+	for range ch { //nolint:revive // drain to close
+	}
 }

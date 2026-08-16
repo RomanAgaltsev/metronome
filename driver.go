@@ -6,8 +6,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 // DefaultResultBuffer is the capacity of Run's result channel when
@@ -26,7 +24,7 @@ type runConfig struct {
 	buffer  int
 	clock   Clock
 	start   time.Time
-	lim     *rate.Limiter
+	pacer   *pacer
 	claimed *atomic.Int64
 }
 
@@ -44,11 +42,9 @@ type Driver struct {
 	Workers     int
 	MaxRequests int
 
-	// Clock supplies elapsed time to Rate. In this version it feeds ONLY
-	// Rate(elapsed): the limiter and the update cadence still run on the wall
-	// clock, so a ManualClock that is never advanced pins the rate at Rate(0)
-	// for the whole run rather than making pacing deterministic. Leave nil for
-	// the wall clock.
+	// Clock supplies time to the whole pacing path: the rate schedule, the
+	// sleeps between units of work, and the rate-update cadence. Leave nil for
+	// the wall clock; inject a ManualClock to drive pacing exactly in tests.
 	Clock Clock
 
 	// ResultBuffer is the capacity of the channel Run returns. Zero selects
@@ -93,7 +89,7 @@ func (d *Driver) config() runConfig {
 		buffer:  buffer,
 		clock:   clock,
 		start:   clock.Now(),
-		lim:     rate.NewLimiter(sanitizeRate(d.Rate.Rate(0)), 1),
+		pacer:   newPacer(clock, d.Rate.Rate(0), 1),
 		claimed: new(atomic.Int64),
 	}
 }
@@ -101,15 +97,12 @@ func (d *Driver) config() runConfig {
 // runUpdater re-reads the RateController every rateUpdateInterval and applies
 // the result to the limiter, so a live SetRate takes effect mid-run.
 func (d *Driver) runUpdater(ctx context.Context, cfg runConfig) {
-	t := time.NewTicker(rateUpdateInterval)
-	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		if err := cfg.clock.Sleep(ctx, rateUpdateInterval); err != nil {
 			return
-		case <-t.C:
-			cfg.lim.SetLimit(sanitizeRate(d.Rate.Rate(cfg.clock.Now().Sub(cfg.start))))
 		}
+		now := cfg.clock.Now()
+		cfg.pacer.setRate(now, d.Rate.Rate(now.Sub(cfg.start)))
 	}
 }
 

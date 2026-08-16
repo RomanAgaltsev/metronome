@@ -7,6 +7,13 @@ import (
 
 // Result is the outcome of one unit of work.
 type Result struct {
+	// Scheduled is the ideal send time for this unit of work per the pacing
+	// schedule — the time it would have been sent by a client that never
+	// queued. Start minus Scheduled is the queueing delay the generator itself
+	// imposed, and is what Stats uses to correct for coordinated omission. Zero
+	// if the Result did not come from a Driver.
+	Scheduled time.Time
+
 	Start   time.Time
 	Latency time.Duration
 	Err     error
