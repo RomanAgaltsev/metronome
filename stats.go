@@ -19,7 +19,8 @@ type Stats struct {
 	clamped          int64
 	first            time.Time
 	last             time.Time
-	maxLat           time.Duration
+	maxLat           time.Duration // largest raw Latency
+	maxLag           time.Duration // largest Start-Scheduled, floored at zero
 	bytes            int64
 	codes            map[string]int64
 	corrected        *hdr.Histogram
@@ -105,6 +106,9 @@ func (s *Stats) Record(r Result) {
 		if queued < 0 {
 			queued = 0 // ran early: never correct downward
 		}
+		if queued > s.maxLag {
+			s.maxLag = queued
+		}
 		// Counted separately from s.clamped: this says the *corrected*
 		// percentiles hit a bound, which a raw latency well inside the range can
 		// still cause once the queueing delay is added.
@@ -167,6 +171,7 @@ func (s *Stats) Snapshot() Snapshot {
 		ErrorRate: errRate,
 		P50:       us(50), P95: us(95), P99: us(99),
 		Max:              s.maxLat,
+		MaxScheduleLag:   s.maxLag,
 		Clamped:          s.clamped,
 		CorrectedClamped: s.correctedClamped,
 		Saturated:        s.saturated,

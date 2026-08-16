@@ -14,11 +14,20 @@ var ErrSaturated = errors.New("metronome: no worker free at scheduled time")
 
 // Result is the outcome of one unit of work.
 type Result struct {
-	// Scheduled is the ideal send time for this unit of work per the pacing
-	// schedule — the time it would have been sent by a client that never
-	// queued. Start minus Scheduled is the queueing delay the generator itself
-	// imposed, and is what Stats uses to correct for coordinated omission. Zero
-	// if the Result did not come from a Driver.
+	// Scheduled is the time this unit of work was due per the pacing schedule —
+	// the run's origin plus one interval for each unit dispatched before it,
+	// advanced independently of when the generator actually got to it.
+	//
+	// Start minus Scheduled is therefore the generator's own queueing delay: the
+	// wait a client that never fell behind would have suffered before its
+	// request even started. It is what Stats uses to correct for coordinated
+	// omission, and it is aggregated as Snapshot.MaxScheduleLag.
+	//
+	// It may be in the past relative to Start (the generator was late — the
+	// whole point) or in the future when Burst > 1 lets several units go at once
+	// and the schedule says the later ones were not due yet; Stats floors the
+	// correction at zero for that case. Zero if the Result did not come from a
+	// Driver.
 	Scheduled time.Time
 
 	Start   time.Time
@@ -59,6 +68,13 @@ type Snapshot struct {
 	// something about CorrectedP50/P95/P99 only — a run can have
 	// CorrectedClamped > 0 with Clamped == 0 and percentiles that are fine.
 	CorrectedClamped int64
+
+	// MaxScheduleLag is the largest gap between when a unit of work was due and
+	// when it actually started. It is the generator's own lateness: non-zero
+	// means metronome did not keep the schedule it offered, whatever the target
+	// did. Read it against Saturated — a large lag with Saturated == 0 says the
+	// generator, not the target, is the bottleneck.
+	MaxScheduleLag time.Duration
 
 	// Saturated counts Results carrying ErrSaturated: open-loop units that found
 	// no free worker at their scheduled time. They are included in Errors and
