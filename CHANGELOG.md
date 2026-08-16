@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/RomanAgaltsev/metronome/compare/v0.3.1...v0.3.2) (2026-08-16)
+
+
+### Bug Fixes
+
+* bound open-loop delivery and stop the schedule leading dispatch ([#15](https://github.com/RomanAgaltsev/metronome/issues/15)) ([4b1a399](https://github.com/RomanAgaltsev/metronome/commit/4b1a3995eba12ee2c5d3fe6118eb9cedcb9dbde5))
+
 ## [0.3.1](https://github.com/RomanAgaltsev/metronome/compare/v0.3.0...v0.3.1) (2026-08-16)
 
 
