@@ -123,6 +123,64 @@ func TestPacerScheduleIsAnchoredNotDerivedFromArrival(t *testing.T) {
 	}
 }
 
+// The schedule must never claim a unit was due LATER than it actually went out.
+// Without that bound the anchor accumulates a permanent lead, and every later
+// Start-Scheduled goes negative — which Stats floors to zero, silently switching
+// the correction back off.
+//
+// The floored-rate route into this is already closed by maxReservationWait: a
+// reserve beyond the cap returns before touching the schedule, so nominal never
+// jumps 2h46m ahead. This pins that, so the two fixes cannot drift apart.
+func TestPacerScheduleNeverLeadsActualDispatch(t *testing.T) {
+	m := NewManualClock(time.Unix(0, 0))
+	p := newPacer(m, 100, 1) // 10ms interval
+
+	if _, err := p.next(context.Background()); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+
+	// Floor the rate, let one unit through at the floor, then restore it. Before
+	// the clamp this left nominal 2h46m40s ahead of the clock for good.
+	p.setRate(0)
+	if _, err := p.reserve(); err == nil {
+		t.Log("floored reserve committed")
+	}
+	p.setRate(100)
+
+	s, err := p.reserve()
+	if err != nil {
+		t.Fatalf("reserve after resume: %v", err)
+	}
+	if lead := s.scheduled.Sub(m.Now()); lead > 10*time.Millisecond {
+		t.Fatalf("scheduled %v ahead of the clock after a floored rate; the anchor kept a "+
+			"permanent lead and the correction is dead for the rest of the run", lead)
+	}
+}
+
+// Burst legitimately dispatches B units at once. The schedule must not then sit
+// (B-1) intervals ahead of reality for the whole run, hiding that much lag.
+func TestPacerBurstDoesNotLeaveAPermanentLead(t *testing.T) {
+	m := NewManualClock(time.Unix(0, 0))
+	p := newPacer(m, 10, 5) // 100ms interval, burst 5
+
+	for range 5 { // drain the burst; all five go out at once
+		if _, err := p.reserve(); err != nil {
+			t.Fatalf("burst reserve: %v", err)
+		}
+	}
+	s, err := p.reserve() // the first paced unit
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	// It actually goes out at now+delay; the schedule must not say it was due
+	// four intervals after that.
+	if actual := m.Now().Add(s.delay); s.scheduled.After(actual) {
+		t.Fatalf("scheduled %v but the unit goes out at %v — the schedule leads dispatch by "+
+			"%v, so that much lag is invisible for the rest of the run",
+			s.scheduled.Sub(time.Unix(0, 0)), actual.Sub(time.Unix(0, 0)), s.scheduled.Sub(actual))
+	}
+}
+
 func TestPacerUnlimitedRateHasNoSchedule(t *testing.T) {
 	m := NewManualClock(time.Unix(0, 0))
 	p := newPacer(m, math.Inf(1), 1)

@@ -437,6 +437,51 @@ func TestOpenLoopDoesNotBlameTheConsumer(t *testing.T) {
 	}
 }
 
+// A consumer that stops reading must not make the generator grow without bound.
+// The v0.2.2 fix for false saturation released the in-flight slot before the
+// result send, which removed the only ceiling on live goroutines: they then
+// accumulated at the offered rate for as long as the consumer stayed away.
+func TestOpenLoopDoesNotLeakGoroutinesOnAStalledConsumer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive")
+	}
+	const workers, buffer = 4, 16
+	d := Driver{
+		Runner:       RunnerFunc(func(context.Context) Result { return Result{} }),
+		Rate:         Constant(2000),
+		Workers:      workers,
+		ResultBuffer: buffer,
+		Pacing:       OpenLoop,
+		// MaxRequests 0: unlimited, as a soak run would be.
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	base := runtime.NumGoroutine()
+	ch := d.Run(ctx)
+
+	// Never read from ch. At 2000 rps an unbounded implementation adds ~2000
+	// goroutines per second; a bounded one settles near workers+buffer.
+	var peak int
+	for range 5 {
+		time.Sleep(200 * time.Millisecond)
+		if n := runtime.NumGoroutine() - base; n > peak {
+			peak = n
+		}
+	}
+
+	// The real ceiling is workers + max(buffer, minDeliveryBacklog) plus the
+	// driver's own few goroutines; doubling it leaves room without coming close
+	// to the 1926 an unbounded implementation reached here.
+	bound := workers + max(buffer, minDeliveryBacklog)
+	if peak > bound*2 {
+		t.Errorf("goroutines peaked at %d above baseline over 1s with a stalled consumer "+
+			"(ceiling should be ~%d); delivery is not bounded", peak, bound)
+	}
+
+	cancel()
+	for range ch { // drain to close
+	}
+}
+
 func TestClosedLoopIsTheDefault(t *testing.T) {
 	var concurrent, maxConcurrent atomic.Int64
 	d := Driver{
