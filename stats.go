@@ -7,7 +7,7 @@ import (
 	hdr "github.com/HdrHistogram/hdrhistogram-go"
 )
 
-// Stats aggregates Result into percentile Snapshots. Safe for concurrent Record.
+// Stats aggregates Results into percentile Snapshots. Safe for concurrent Record.
 type Stats struct {
 	mu     sync.Mutex
 	hist   *hdr.Histogram
@@ -18,10 +18,13 @@ type Stats struct {
 	maxLat time.Duration
 }
 
+// NewStats returns Stats recording latencies from 1µs to 60s with 3 significant
+// digits. Use NewStatsRange for a different range.
 func NewStats() *Stats {
 	return &Stats{hist: hdr.New(1, int64(60*time.Second/time.Microsecond), 3)}
 }
 
+// Record adds one Result to the aggregate. It is safe to call concurrently.
 func (s *Stats) Record(r Result) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -45,6 +48,8 @@ func (s *Stats) Record(r Result) {
 	}
 }
 
+// Snapshot returns the aggregate so far. It is safe to call concurrently with
+// Record. The returned Snapshot is an independent copy.
 func (s *Stats) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()

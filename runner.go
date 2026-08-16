@@ -13,6 +13,7 @@ type Runner interface {
 // RunnerFunc adapts a function to a Runner.
 type RunnerFunc func(ctx context.Context) Result
 
+// Do calls f.
 func (f RunnerFunc) Do(ctx context.Context) Result { return f(ctx) }
 
 // Weighted pairs a Runner with a selection weight.
@@ -22,7 +23,7 @@ type Weighted struct {
 }
 
 // Mix returns a Runner that picks one sub-Runner per Do, weighted by Weight.
-// It panics if no runner are given, a weight is negative, or all weights are
+// It panics if no runners are given, a weight is negative, or all weights are
 // zero - programmer errors and Runner has no error path to report them.
 func Mix(ws ...Weighted) Runner {
 	total := 0

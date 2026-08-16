@@ -121,6 +121,11 @@ linters:
 
     revive:
       severity: warning
+      rules:
+        # A library's exported surface is its product. Without this rule, revive's
+        # defaults are disabled entirely by the presence of a settings block.
+        - name: exported
+          arguments: [checkPrivateReceivers]
 
     perfsprint:
       int-conversion: true

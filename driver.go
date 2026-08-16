@@ -13,9 +13,9 @@ const defWorkers int = 10
 
 // Driver runs a Runner under a RateController across Workers goroutines,
 // emitting Results on the returned channel until ctx is cancelled or
-// MaxRequest results have been produced (MaxRequests == 0 means unlimited).
+// MaxRequests results have been produced (MaxRequests == 0 means unlimited).
 //
-// Contract: when MaxRequest is set, exactly MaxRequest Results are
+// Contract: when MaxRequests is set, exactly MaxRequest Results are
 // delivered unless ctx is cancelled first (cancellation aborts promptly and
 // may drop in-flight results). The channel is closed once all internal
 // goroutines exit. The caller must drain the channel or cancel ctx.
@@ -27,6 +27,18 @@ type Driver struct {
 	Clock       Clock
 }
 
+// Run starts the workers and returns the channel Results are delivered on.
+//
+// Run has a pointer receiver, so it cannot be called on a composite literal:
+// bind the Driver to a variable first (d := Driver{...}; d.Run(ctx)).
+//
+// The caller MUST drain the returned channel until it closes, or cancel ctx.
+// Abandoning a live channel leaves the workers blocked on the send and leaks
+// them for the lifetime of the process.
+//
+// Run panics if Runner or Rate is nil — programmer errors, not runtime
+// conditions. Workers <= 0 defaults to DefaultWorkers.
+//
 //nolint:gocognit // -
 func (d *Driver) Run(ctx context.Context) <-chan Result {
 	if d.Runner == nil {
