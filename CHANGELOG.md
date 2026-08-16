@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/RomanAgaltsev/metronome/compare/v0.1.0...v0.2.0) (2026-08-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* the Clock interface gains Sleep(ctx, d) error. Callers using SystemClock() or NewManualClock() are unaffected; a custom Clock implementation must add the method.
+
+### Features
+
+* pacing correctness, open-loop mode, and v0.1 review remediation ([#5](https://github.com/RomanAgaltsev/metronome/issues/5)) ([f1ee0ed](https://github.com/RomanAgaltsev/metronome/commit/f1ee0ed62e4b797d26523df8b3fd530f47042b29))
+
 ## 0.1.0 (2026-08-15)
 
 
