@@ -59,10 +59,15 @@ for r := range d.Run(context.Background()) {
 	stats.Record(r)
 }
 
-snap := stats.Snapshot()
-fmt.Printf("%d requests, %.1f rps, %.2f%% errors, p95 %v\n",
-	snap.Count, snap.RPS, snap.ErrorRate*100, snap.P95)
+fmt.Println(stats.Snapshot())
+// 5000 requests, 198.7 rps, 0.14% err (0 saturated), p50/p95/p99 12ms/41ms/88ms,
+// corrected p95/p99 41ms/89ms, behind schedule 1.2ms
 ```
+
+`Snapshot` is a plain struct — reach for the fields when you want them
+(`snap.P95`, `snap.Codes`, `snap.Bytes`). `String()` is there so every consumer
+does not reinvent the same summary line, and so the numbers that matter appear in
+the order they should be read.
 
 You **must** drain the channel until it closes, or cancel the context —
 abandoning a live channel leaks the workers.
