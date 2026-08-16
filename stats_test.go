@@ -2,6 +2,7 @@ package metronome
 
 import (
 	"errors"
+	"maps"
 	"math"
 	"testing"
 	"time"
@@ -116,5 +117,43 @@ func TestNewStatsRangeRejectsBadBounds(t *testing.T) {
 			}()
 			tc.fn()
 		})
+	}
+}
+
+func TestSnapshotAggregatesBytesAndCodes(t *testing.T) {
+	s := NewStats()
+	base := time.Unix(0, 0)
+	// 5 results spaced 250ms → 4 intervals over 1s.
+	for i, code := range []string{"200", "200", "500", "200", "429"} {
+		s.Record(Result{
+			Start:   base.Add(time.Duration(i) * 250 * time.Millisecond),
+			Latency: 10 * time.Millisecond,
+			Code:    code,
+			Bytes:   1000,
+		})
+	}
+	s.Record(Result{Start: base, Latency: time.Millisecond}) // no Code: must not create an "" key
+
+	snap := s.Snapshot()
+	if snap.Bytes != 5000 {
+		t.Fatalf("Bytes=%d want 5000", snap.Bytes)
+	}
+	if math.Abs(snap.Throughput-5000/1.0) > 1e-6 {
+		t.Fatalf("Throughput=%v want 5000 bytes/sec", snap.Throughput)
+	}
+	want := map[string]int64{"200": 3, "500": 1, "429": 1}
+	if !maps.Equal(snap.Codes, want) {
+		t.Fatalf("Codes=%v want %v", snap.Codes, want)
+	}
+}
+
+func TestSnapshotCodesIsACopy(t *testing.T) {
+	s := NewStats()
+	s.Record(Result{Start: time.Unix(0, 0), Latency: time.Millisecond, Code: "200"})
+	snap := s.Snapshot()
+	snap.Codes["200"] = 99 // caller mutates their copy
+
+	if got := s.Snapshot().Codes["200"]; got != 1 {
+		t.Fatalf("Codes[200]=%d after a caller mutated a Snapshot; Snapshot must return a copy", got)
 	}
 }

@@ -12,7 +12,13 @@ type Result struct {
 	Err     error
 	Code    string // status/gRPC code, caller-supplied
 	Bytes   int64
-	Labels  map[string]string // e.g. {"endpoint": "get_user"} for breakdown
+
+	// Labels is caller-side metadata carried alongside the Result, e.g.
+	// {"endpoint": "get_user"}. Stats does not aggregate it: a per-label
+	// breakdown helper is roadmapped, and until it exists a caller who needs
+	// one keys their own map off these Results. Leave it nil if unused — it is
+	// an allocation per request.
+	Labels map[string]string
 }
 
 // Success reports whether the unit of work completed without error.
@@ -32,6 +38,16 @@ type Snapshot struct {
 	// understate reality at one end — widen the range with NewStatsRange. Max
 	// always reports the true maximum regardless.
 	Clamped int64
+
+	// Bytes is the sum of Result.Bytes.
+	Bytes int64
+
+	// Throughput is Bytes/sec over the same span RPS is measured across.
+	Throughput float64
+
+	// Codes counts Results by Result.Code. Results with an empty Code are
+	// counted in Count but not here. The map is a copy owned by the caller.
+	Codes map[string]int64
 }
 
 // PanicError reports a panic raised inside a Runner. The Driver recovers it so

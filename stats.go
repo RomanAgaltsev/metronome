@@ -1,6 +1,7 @@
 package metronome
 
 import (
+	"maps"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ type Stats struct {
 	first   time.Time
 	last    time.Time
 	maxLat  time.Duration
+	bytes   int64
+	codes   map[string]int64
 }
 
 // NewStats returns Stats recording latencies from 1µs to 60s with 3 significant
@@ -42,7 +45,10 @@ func NewStatsRange(lo, hi time.Duration, sigfigs int) *Stats {
 	if sigfigs < 1 || sigfigs > 5 {
 		panic("metronome: NewStatsRange sigfigs must be in [1, 5]")
 	}
-	return &Stats{hist: hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs)}
+	return &Stats{
+		hist:  hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs),
+		codes: make(map[string]int64),
+	}
 }
 
 // clampMicros converts d to whole microseconds inside the histogram's range,
@@ -66,6 +72,10 @@ func (s *Stats) Record(r Result) {
 	s.count++
 	if !r.Success() {
 		s.errors++
+	}
+	s.bytes += r.Bytes
+	if r.Code != "" {
+		s.codes[r.Code]++
 	}
 
 	// Failed Results' latencies are recorded too (the k6/vegeta convention):
@@ -96,9 +106,10 @@ func (s *Stats) Snapshot() Snapshot {
 	// N Result.Start timestamps bound N-1 intervals, so the unbiased rate
 	// estimate is (N-1)/span. Using N/span reports r*N/(N-1) — 10% high at N=11
 	// and 100% high at N=2. A single Result bounds no interval and reports 0.
-	rps := 0.0
+	rps, throughput := 0.0, 0.0
 	if span := s.last.Sub(s.first).Seconds(); s.count > 1 && span > 0 {
 		rps = float64(s.count-1) / span
+		throughput = float64(s.bytes) / span
 	}
 
 	errRate := 0.0
@@ -110,8 +121,15 @@ func (s *Stats) Snapshot() Snapshot {
 		return time.Duration(s.hist.ValueAtQuantile(p)) * time.Microsecond
 	}
 	return Snapshot{
-		Count: s.count, Errors: s.errors, RPS: rps, ErrorRate: errRate,
-		P50: us(50), P95: us(95), P99: us(99), Max: s.maxLat,
-		Clamped: s.clamped,
+		Count:     s.count,
+		Errors:    s.errors,
+		RPS:       rps,
+		ErrorRate: errRate,
+		P50:       us(50), P95: us(95), P99: us(99),
+		Max:        s.maxLat,
+		Clamped:    s.clamped,
+		Bytes:      s.bytes,
+		Throughput: throughput,
+		Codes:      maps.Clone(s.codes),
 	}
 }
