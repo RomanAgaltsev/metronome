@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// PacingMode selects how the Driver reacts when the target cannot keep up.
+type PacingMode int
+
 // DefaultResultBuffer is the capacity of Run's result channel when
 // Driver.ResultBuffer is zero.
 const DefaultResultBuffer = 1024
@@ -17,6 +20,21 @@ const DefaultWorkers = 10
 
 // rateUpdateInterval is how often the limiter is re-read from the RateController.
 const rateUpdateInterval = 100 * time.Millisecond
+
+const (
+	// ClosedLoop is the default: a worker does not ask for its next token until
+	// the current unit of work has completed. Simple and self-throttling, but a
+	// slow target reduces the achieved rate, and latency percentiles are subject
+	// to coordinated omission (Stats' Corrected* fields quantify how much).
+	ClosedLoop PacingMode = iota
+
+	// OpenLoop keeps the schedule regardless of the target: one dispatcher paces
+	// and hands each unit to a free worker, or — if all Workers are busy —
+	// records a Result carrying ErrSaturated and moves on. Saturation becomes a
+	// counted signal instead of silent rate sag. Workers is the maximum
+	// in-flight cap in this mode.
+	OpenLoop
+)
 
 // runConfig is the resolved, validated form of a Driver for one Run.
 type runConfig struct {
@@ -29,13 +47,15 @@ type runConfig struct {
 }
 
 // Driver runs a Runner under a RateController across Workers goroutines,
-// emitting Results on the returned channel until ctx is cancelled or
+// emitting Results on the channel Run returns until ctx is cancelled or
 // MaxRequests results have been produced (MaxRequests == 0 means unlimited).
 //
-// Contract: when MaxRequests is set, exactly MaxRequest Results are
-// delivered unless ctx is cancelled first (cancellation aborts promptly and
-// may drop in-flight results). The channel is closed once all internal
-// goroutines exit. The caller must drain the channel or cancel ctx.
+// Contract: when MaxRequests is set, exactly MaxRequests Results are delivered
+// unless ctx is cancelled first (cancellation aborts promptly and may drop
+// in-flight results). In OpenLoop mode a saturated attempt counts as one of
+// them. Results are NOT ordered — in OpenLoop a saturated unit is emitted
+// immediately while an earlier unit is still running. The channel is closed
+// once all internal goroutines exit; the caller must drain it or cancel ctx.
 type Driver struct {
 	Runner      Runner
 	Rate        RateController
@@ -54,6 +74,14 @@ type Driver struct {
 	// channel a consumer that pauses blocks a worker that is holding a
 	// rate-limiter token, producing rate sag the target did not cause.
 	ResultBuffer int
+
+	// Pacing selects ClosedLoop (default) or OpenLoop. See PacingMode.
+	Pacing PacingMode
+
+	// Burst is the rate limiter's burst size; 0 means 1. Burst 1 gives the
+	// smoothest schedule. A larger burst lets the generator catch up in a bunch
+	// after a stall, which is sometimes what you want and is never smooth.
+	Burst int
 }
 
 // config validates the Driver and resolves its defaults. It panics on nil
@@ -89,7 +117,7 @@ func (d *Driver) config() runConfig {
 		buffer:  buffer,
 		clock:   clock,
 		start:   clock.Now(),
-		pacer:   newPacer(clock, d.Rate.Rate(0), 1),
+		pacer:   newPacer(clock, d.Rate.Rate(0), d.Burst),
 		claimed: new(atomic.Int64),
 	}
 }
@@ -124,8 +152,14 @@ func (d *Driver) Run(ctx context.Context) <-chan Result {
 
 	var wg sync.WaitGroup
 	wg.Go(func() { d.runUpdater(stopCtx, cfg) })
-	for range cfg.workers {
-		wg.Go(func() { d.runClosedLoopWorker(ctx, stopCtx, stop, cfg, out) })
+
+	switch d.Pacing {
+	case OpenLoop:
+		wg.Go(func() { d.runOpenLoop(ctx, stopCtx, stop, cfg, out) })
+	default:
+		for range cfg.workers {
+			wg.Go(func() { d.runClosedLoopWorker(ctx, stopCtx, stop, cfg, out) })
+		}
 	}
 
 	go func() {

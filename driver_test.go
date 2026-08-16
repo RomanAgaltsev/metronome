@@ -344,3 +344,104 @@ func TestDriverPacesDeterministically(t *testing.T) {
 	for range ch { //nolint:revive // drain to close
 	}
 }
+
+func TestOpenLoopRecordsSaturation(t *testing.T) {
+	release := make(chan struct{})
+	d := Driver{
+		Runner: RunnerFunc(func(ctx context.Context) Result {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return Result{Latency: time.Millisecond}
+		}),
+		Rate:        Constant(1000),
+		Workers:     1, // exactly one in-flight unit allowed
+		MaxRequests: 20,
+		Pacing:      OpenLoop,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var saturated, completed int
+	var released bool
+	ch := d.Run(ctx)
+	for r := range ch {
+		if errors.Is(r.Err, ErrSaturated) {
+			saturated++
+			if r.Scheduled.IsZero() {
+				t.Error("a saturated Result must still carry its Scheduled time")
+			}
+		} else {
+			completed++
+		}
+		// Close once, and never reassign release: the Runner closure reads the
+		// variable, so nilling it would park every later worker on a nil channel
+		// until ctx expires.
+		if saturated >= 5 && !released {
+			close(release) // let the stuck worker finish so the run can drain
+			released = true
+		}
+	}
+	if saturated == 0 {
+		t.Fatal("open loop with 1 worker and a blocked Runner recorded no saturation — " +
+			"the schedule blocked on the target instead")
+	}
+	if saturated+completed != 20 {
+		t.Fatalf("dispatched %d units (%d saturated + %d completed), want 20 — "+
+			"MaxRequests counts saturated attempts", saturated+completed, saturated, completed)
+	}
+}
+
+func TestClosedLoopIsTheDefault(t *testing.T) {
+	var concurrent, maxConcurrent atomic.Int64
+	d := Driver{
+		Runner: RunnerFunc(func(context.Context) Result {
+			c := concurrent.Add(1)
+			for {
+				m := maxConcurrent.Load()
+				if c <= m || maxConcurrent.CompareAndSwap(m, c) {
+					break
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+			concurrent.Add(-1)
+			return Result{Latency: 5 * time.Millisecond}
+		}),
+		Rate:        Constant(1000),
+		Workers:     3,
+		MaxRequests: 30,
+	}
+	for r := range d.Run(context.Background()) {
+		if errors.Is(r.Err, ErrSaturated) {
+			t.Fatal("the default mode must be closed-loop: it blocks, it never saturates")
+		}
+	}
+	if got := maxConcurrent.Load(); got > 3 {
+		t.Fatalf("max concurrency %d exceeded Workers=3", got)
+	}
+}
+
+func TestDriverBurstIsHonoured(t *testing.T) {
+	m := NewManualClock(time.Unix(0, 0))
+	d := Driver{
+		Runner:      RunnerFunc(func(context.Context) Result { return Result{Latency: time.Millisecond} }),
+		Rate:        Constant(1), // one per second...
+		Workers:     4,
+		MaxRequests: 5,
+		Burst:       5, // ...but five available at once
+		Clock:       m,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	n := 0
+	for range d.Run(ctx) {
+		n++
+	}
+	// All five come from the initial burst without the clock advancing at all.
+	if n != 5 {
+		t.Fatalf("got %d results from a burst of 5 on a frozen clock, want 5", n)
+	}
+}

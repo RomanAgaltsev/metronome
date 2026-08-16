@@ -1,9 +1,16 @@
 package metronome
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
+
+// ErrSaturated marks an open-loop unit of work that found no free worker at its
+// scheduled time. It is recorded rather than silently dropped, so saturation
+// appears in Snapshot.ErrorRate instead of as invisible rate sag. Test for it
+// with errors.Is.
+var ErrSaturated = errors.New("metronome: no worker free at scheduled time")
 
 // Result is the outcome of one unit of work.
 type Result struct {
