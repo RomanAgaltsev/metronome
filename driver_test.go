@@ -71,8 +71,6 @@ func TestDriverPacesApproximately(t *testing.T) {
 		n++
 	}
 	elapsed := time.Since(start)
-	// 100 requests at 200 rps ≈ 500ms ideal (burst 1). Bounds are wide because
-	// coarse Windows timers overshoot — but pacing that is off by 10x must fail.
 	if n != 100 {
 		t.Fatalf("received %d results, want 100", n)
 	}

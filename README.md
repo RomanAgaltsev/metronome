@@ -62,7 +62,11 @@ abandoning a live channel leaks the workers.
 | `Constant`, `Ramp`, `Phased` | static rate profiles |
 | `Adaptive` + `SetRate` | rate driven live from outside (a control loop) |
 | `Driver` | the paced worker pool; `Run(ctx) <-chan Result` |
-| `Stats` / `Snapshot` | HDR-histogram percentiles, error rate, achieved rps |
+| `Pacing` + `ClosedLoop` / `OpenLoop` | how the Driver reacts when the target cannot keep up |
+| `Burst` | rate-limiter burst size; 0 means 1 (smoothest schedule) |
+| `ErrSaturated` | open-loop marker: no worker was free at the scheduled time |
+| `Stats` / `Snapshot` | HDR-histogram percentiles, error rate, achieved rps, bytes/codes |
+| `Snapshot.Corrected*` | coordinated-omission-corrected percentiles (see the caveat below) |
 | `Clock` / `ManualClock` | injected time, for deterministic tests |
 
 ## Pacing model — read this before trusting the numbers
@@ -90,6 +94,15 @@ no free worker is delivered immediately as a `Result` whose `Err` matches
 `Snapshot.ErrorRate`, not as invisible sag. `Workers` becomes the maximum in-flight
 cap.
 
+Open loop paces from **one** dispatcher goroutine, which sleeps once per unit of
+work. Below roughly a 250µs interval that sleep costs more than the interval, and the
+dispatcher — not the target — becomes the bottleneck: on the machine measured below,
+open loop holds 1,000 rps exactly and delivers only **74% of 5,000 rps**, with zero
+`ErrSaturated` results, because the target was never asked. Closed loop does not have
+this ceiling (its `Workers` goroutines sleep concurrently, so each individual sleep is
+`Workers` times longer). Above ~1,000 rps, compare `Snapshot.RPS` against the rate you
+asked for, and prefer closed loop if the gap matters more than schedule fidelity.
+
 ### Raw vs corrected percentiles
 
 Every `Result` from a `Driver` carries `Scheduled`, the time it *should* have been
@@ -109,29 +122,53 @@ fmt.Printf("p95 %v (corrected %v), achieved %.1f rps, %.1f%% saturated\n",
 	snap.P95, snap.CorrectedP95, snap.RPS, snap.ErrorRate*100)
 ```
 
+> **Known limitation in v0.2 — do not rely on `Corrected*` yet.**
+> `Scheduled` is currently derived from the moment the pacer *arrives* plus whatever
+> delay the rate limiter still owes. When the generator is running behind, the limiter
+> already holds a token, that delay is zero, and `Scheduled` collapses onto `Start`.
+> The queueing delay is therefore recorded as zero in exactly the situation that
+> creates it, and `CorrectedP50/P95/P99` come back equal to `P50/P95/P99`. Measured:
+> one worker offered 100 rps against a 50ms target achieves 19.9 rps, and reports
+> `P99 = CorrectedP99 = 50.0ms`. `Burst` does not change this.
+>
+> Until this is fixed, compare `Snapshot.RPS` against the rate you asked for — that
+> gap is the honest sag signal. Anchoring the schedule to a fixed origin (so a late
+> arrival is measured against the schedule instead of redefining it) is the subject of
+> v0.3.
+
 ### Measured accuracy
 
-<!-- Numbers from Task 15's real run; replace the machine line with the real one. -->
-
-Measured on <CPU model>, <OS>, Go <version>, machine otherwise idle
-(`go test -bench . ./...`):
+Measured on an AMD Ryzen 5 3600 (6 cores / 12 threads), Windows 11, Go 1.26.6,
+machine otherwise idle. Adherence is achieved rps ÷ offered rps; 1.00 is perfect.
 
 | Offered rate | Closed-loop adherence | Open-loop adherence |
 |---|---|---|
-| 10 rps | <measured> | <measured> |
-| 100 rps | <measured> | <measured> |
-| 1,000 rps | <measured> | <measured> |
-| 5,000 rps | <measured> | <measured> |
+| 10 rps | 1.00 | 1.00 |
+| 100 rps | 1.00 | 1.00 |
+| 1,000 rps | 1.00 | 1.00 |
+| 5,000 rps | 1.00 | **0.74** |
 
-Per-request kernel overhead (no-op Runner, unlimited rate): **<measured> ns/op**
-closed-loop, **<measured> ns/op** open-loop — an upper bound of roughly
-**<measured> rps** on this machine. Reproduce with
-`go test -run '^$' -bench . ./...`.
-`
+The 0.74 is real and reproducible, and it is a limit of the generator, not of the
+target — see the open-loop note above. Reproduce with:
+
+```bash
+go test -run '^$' -bench BenchmarkDriverPaced -benchtime 3x ./...
+```
+
+Per-request kernel overhead (no-op `Runner`, unlimited rate, `Workers = GOMAXPROCS`):
+**425 ns/op** closed-loop and **752 ns/op** open-loop, i.e. a plumbing ceiling near
+**2.3M rps** and **1.3M rps** respectively. Note the gap between that ceiling and the
+5,000 rps adherence figure above: metronome's limit at realistic rates is sleep
+granularity, not CPU. `Stats.Record` costs **193 ns/op** under full contention.
+Reproduce with:
+
+```bash
+go test -run '^$' -bench 'BenchmarkDriverOverhead|BenchmarkStatsRecord' ./...
+```
 
 ## Status
 
-v0.1 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
+v0.2 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
 versions may carry small breaking changes**, always with a migration note in the
 CHANGELOG. Pin an exact version.
 
@@ -145,4 +182,3 @@ CHANGELOG. Pin an exact version.
 ## License
 
 MIT
-`

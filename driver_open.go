@@ -10,7 +10,7 @@ import (
 // Each scheduled unit either claims one of Workers slots and runs, or - if
 // every slot is busy - is emitted immediately as an ErrSaturated Result. That
 // is the whole point of the mode: the schedule is kept and the target's
-// inability to keep up is recorded rather that absorbed as a delay that quietly
+// inability to keep up is recorded rather than absorbed as a delay that quietly
 // deflates the achieved rate.
 //
 // A semaphore is used rather than a non-blocking send to a work channel because
