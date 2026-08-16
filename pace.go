@@ -19,7 +19,7 @@ const minRPS = 0.0001
 // can honour.
 //
 // NaN as the dangerous case and the reason this function exists: Go's max
-// propogates NaN, so a naive max(rps, minRPS) floor does not catch it and
+// propagates NaN, so a naive max(rps, minRPS) floor does not catch it and
 // rate.Limit(NaN) makes every Wait and Reserve return immediately - the Driver
 // stops pacing and floods the target. A control loop that divides by an empty
 // PromQL vector produces exactly that. NaN is therefore treated as "paused",
