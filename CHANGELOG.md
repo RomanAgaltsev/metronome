@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/RomanAgaltsev/metronome/compare/v0.2.2...v0.3.0) (2026-08-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* Result.Scheduled changes meaning. It is now the anchored nominal send time rather than arrival-time-plus-remaining-delay, so Snapshot.Corrected* starts returning values that differ from the raw percentiles. A consumer whose dashboards showed the two as identical will see them diverge -- that is the fix, not a regression. No signatures changed; Snapshot.MaxScheduleLag is additive.
+
+### Features
+
+* anchor the pacing schedule so corrected percentiles mean something ([#11](https://github.com/RomanAgaltsev/metronome/issues/11)) ([6de3081](https://github.com/RomanAgaltsev/metronome/commit/6de3081699c272d55545acb73700ea3aa697ee4b))
+
 ## [0.2.2](https://github.com/RomanAgaltsev/metronome/compare/v0.2.1...v0.2.2) (2026-08-16)
 
 
