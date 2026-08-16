@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/RomanAgaltsev/metronome/compare/v0.2.1...v0.2.2) (2026-08-16)
+
+
+### Bug Fixes
+
+* correct Snapshot's counters and open-loop's slot accounting ([#9](https://github.com/RomanAgaltsev/metronome/issues/9)) ([f8ac9e5](https://github.com/RomanAgaltsev/metronome/commit/f8ac9e54e13158febfe3526ee2aba5e958d6a93c))
+
 ## [0.2.1](https://github.com/RomanAgaltsev/metronome/compare/v0.2.0...v0.2.1) (2026-08-16)
 
 
