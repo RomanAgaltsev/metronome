@@ -110,6 +110,24 @@ type Snapshot struct {
 	CorrectedCount int64
 }
 
+// String renders the numbers a run is usually judged on, in the order they
+// should be read: what was achieved, what it cost, what a schedule-faithful
+// client would have seen, and whether the generator itself kept up.
+//
+// It is a summary, not a serialisation — Codes, Bytes, Throughput and the
+// clamping counters are omitted. Reach for the fields directly when you need
+// them.
+func (s Snapshot) String() string {
+	return fmt.Sprintf(
+		"%d req, %.1f rps, %.2f%% err (%d saturated), p50/p95/p99 %v/%v/%v, "+
+			"corrected p95/p99 %v/%v, behind schedule %v",
+		s.Count, s.RPS, s.ErrorRate*100, s.Saturated,
+		s.P50, s.P95, s.P99,
+		s.CorrectedP95, s.CorrectedP99,
+		s.MaxScheduleLag,
+	)
+}
+
 // PanicError reports a panic raised inside a Runner. The Driver recovers it so
 // that one bad unit of work cannot abort a whole load run; the panic is
 // delivered as a failed Result instead, and Stack holds the stack captured at

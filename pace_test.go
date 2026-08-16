@@ -181,6 +181,46 @@ func TestPacerBurstDoesNotLeaveAPermanentLead(t *testing.T) {
 	}
 }
 
+func TestIntervalOf(t *testing.T) {
+	cases := []struct {
+		name  string
+		limit rate.Limit
+		want  time.Duration
+	}{
+		{"finite", rate.Limit(100), 10 * time.Millisecond},
+		{"the minRPS floor", rate.Limit(minRPS), 10_000 * time.Second},
+		{"unlimited has no schedule", rate.Inf, 0},
+		{"zero has no schedule", rate.Limit(0), 0},
+		{"negative has no schedule", rate.Limit(-1), 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := intervalOf(tc.limit); got != tc.want {
+				t.Fatalf("intervalOf(%v)=%v want %v", tc.limit, got, tc.want)
+			}
+		})
+	}
+}
+
+// intervalOf's doc comment reasons about truncation drift over a million units.
+// This turns that reasoning into a claim: 3 rps is 333.333...ms, the worst kind
+// of interval to truncate to whole nanoseconds.
+func TestIntervalOfDriftStaysNegligible(t *testing.T) {
+	const (
+		units = 100_000
+		rps   = 3
+	)
+	interval := intervalOf(rate.Limit(rps))
+	accumulated := time.Duration(units) * interval
+	exactNanos := float64(units) / rps * float64(time.Second)
+	exact := time.Duration(exactNanos)
+
+	if drift := exact - accumulated; drift < 0 || drift > time.Millisecond {
+		t.Fatalf("after %d units at %d rps the schedule drifts %v from exact; the doc "+
+			"comment claims well under this", units, rps, drift)
+	}
+}
+
 func TestPacerUnlimitedRateHasNoSchedule(t *testing.T) {
 	m := NewManualClock(time.Unix(0, 0))
 	p := newPacer(m, math.Inf(1), 1)

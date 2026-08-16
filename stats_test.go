@@ -4,6 +4,7 @@ import (
 	"errors"
 	"maps"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -130,6 +131,25 @@ func TestSnapshotTracksMaxScheduleLag(t *testing.T) {
 
 	if got := s.Snapshot().MaxScheduleLag; got != 250*time.Millisecond {
 		t.Fatalf("MaxScheduleLag=%v want 250ms (an early unit must not count as negative lag)", got)
+	}
+}
+
+func TestSnapshotStringLeadsWithTheNumbersThatMatter(t *testing.T) {
+	s := NewStats()
+	base := time.Unix(0, 0)
+	s.Record(Result{Scheduled: base, Start: base, Latency: 10 * time.Millisecond})
+	s.Record(Result{
+		Scheduled: base,
+		Start:     base.Add(time.Second),
+		Latency:   20 * time.Millisecond,
+		Err:       ErrSaturated,
+	})
+
+	got := s.Snapshot().String()
+	for _, want := range []string{"2 req", "saturated", "corrected", "behind schedule"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Snapshot.String() = %q, missing %q", got, want)
+		}
 	}
 }
 
