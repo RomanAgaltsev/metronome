@@ -64,6 +64,27 @@ type pacer struct {
 	nominal time.Time
 }
 
+// maxReservationWait caps how long the pacer will commit to a single
+// reservation before re-reading the rate.
+//
+// x/time/rate grants a reservation at a fixed time and SetLimitAt cannot shorten
+// one that already exists. Without this cap, a rate at the minRPS floor — which
+// is where a zero, negative or NaN rate lands — hands out a reservation roughly
+// 2h46m away, and every worker parks on one. Restoring the rate a moment later
+// changes nothing, so "paused" becomes "dead" with no way for the caller to tell
+// the difference. Beyond this cap the pacer gives the token back and re-reserves
+// instead, which costs one wasted reservation per tick and makes a floored rate
+// a pause you can come back from.
+//
+// It is the Driver's rate-update cadence because that is how often the limit can
+// actually change.
+const maxReservationWait = rateUpdateInterval
+
+// errRateTooLow signals that the next unit is further away than
+// maxReservationWait, so next should wait a tick and re-reserve rather than
+// commit. It never escapes next.
+var errRateTooLow = errors.New("metronome: next unit is beyond the reservation cap")
+
 // intervalOf is the nominal gap between consecutive units at limit. A zero
 // interval means "no schedule": rate.Inf demands everything immediately, so
 // nothing can be late against it.
@@ -90,15 +111,27 @@ func newPacer(clock Clock, rps float64, burst int) *pacer {
 // the point. It returns ctx.Err() if ctx is done first, cancelling the
 // reservation so the token is not lost.
 func (p *pacer) next(ctx context.Context) (time.Time, error) {
-	scheduled, delay, rsv, err := p.reserve()
-	if err != nil {
-		return time.Time{}, err
+	for {
+		scheduled, delay, rsv, err := p.reserve()
+		switch {
+		case errors.Is(err, errRateTooLow):
+			// The rate is so low that committing would outlive any plausible
+			// change to it. Wait one update cadence and ask again; the schedule
+			// has not moved, because reserve did not advance it.
+			if err := p.clock.Sleep(ctx, maxReservationWait); err != nil {
+				return time.Time{}, err
+			}
+			continue
+		case err != nil:
+			return time.Time{}, err
+		}
+
+		if err := p.clock.Sleep(ctx, delay); err != nil {
+			rsv.CancelAt(p.clock.Now())
+			return time.Time{}, err
+		}
+		return scheduled, nil
 	}
-	if err := p.clock.Sleep(ctx, delay); err != nil {
-		rsv.CancelAt(p.clock.Now())
-		return time.Time{}, err
-	}
-	return scheduled, nil
 }
 
 // reserve takes the run's next slot: it reads the clock, claims a token, and
@@ -121,6 +154,14 @@ func (p *pacer) reserve() (scheduled time.Time, delay time.Duration, rsv *rate.R
 		return time.Time{}, 0, nil, errors.New("metronome: rate limiter burst is too small for one event")
 	}
 
+	// Hand the token straight back if the unit is further out than we are willing
+	// to commit to, and leave the schedule untouched — an abandoned slot must not
+	// advance it. See maxReservationWait.
+	if delay = rsv.DelayFrom(now); delay > maxReservationWait {
+		rsv.CancelAt(now)
+		return time.Time{}, delay, nil, errRateTooLow
+	}
+
 	// The schedule is anchored to the run's origin and advances one interval per
 	// unit, independent of when this call actually happened. Deriving it from
 	// arrival instead (now + delay) lets a late pacer redefine the schedule: the
@@ -134,7 +175,7 @@ func (p *pacer) reserve() (scheduled time.Time, delay time.Duration, rsv *rate.R
 	}
 	p.nominal = scheduled.Add(interval)
 
-	return scheduled, rsv.DelayFrom(now), rsv, nil
+	return scheduled, delay, rsv, nil
 }
 
 // setRate applies a new limit. It reads the injected Clock itself, under the

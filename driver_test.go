@@ -668,6 +668,94 @@ func TestDriverReportsGeneratorLagUnderAManualClock(t *testing.T) {
 	}
 }
 
+// A rate of zero must be a pause, not a death. The minRPS floor makes the next
+// reservation ~2h46m long, and rate.Limiter.SetLimitAt cannot shorten a
+// reservation that already exists — so before v0.3.1 every one of these hung
+// after the single burst token, and the caller could not tell "paced slowly"
+// from "dead".
+func TestDriverRecoversFromAZeroRate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive")
+	}
+	cases := []struct {
+		name string
+		// newRate is called per subtest, so a controller that has to be resumed
+		// from another goroutine cannot be resumed by an earlier subtest's timer.
+		newRate func() RateController
+	}{
+		{"Ramp from zero", func() RateController {
+			return Ramp{Start: 0, End: 500, Over: 400 * time.Millisecond}
+		}},
+		{"Phased with a zero first phase", func() RateController {
+			return Phased{Phases: []Phase{
+				{Duration: 200 * time.Millisecond, TargetRPS: 0},
+				{Duration: 5 * time.Second, TargetRPS: 500},
+			}}
+		}},
+		{"Adaptive paused then resumed", func() RateController {
+			a := NewAdaptive(0)
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				a.SetRate(500)
+			}()
+			return a
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := Driver{
+				Runner:      RunnerFunc(func(context.Context) Result { return Result{Latency: time.Millisecond} }),
+				Rate:        tc.newRate(),
+				Workers:     4,
+				MaxRequests: 50,
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			n := 0
+			for range d.Run(ctx) {
+				n++
+			}
+			if n != 50 {
+				t.Fatalf("delivered %d/50 — a zero rate must pause the Driver, not end it", n)
+			}
+		})
+	}
+}
+
+// The same defect reached through the input crescendo will actually hit: one
+// degenerate PromQL tick (0/0) reports NaN, sanitizeRate floors it, and the run
+// must still recover when the next tick is healthy.
+func TestDriverRecoversFromATransientNaNRate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive")
+	}
+	a := NewAdaptive(500)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		a.SetRate(math.NaN())
+		time.Sleep(200 * time.Millisecond)
+		a.SetRate(500)
+	}()
+
+	d := Driver{
+		Runner:      RunnerFunc(func(context.Context) Result { return Result{Latency: time.Millisecond} }),
+		Rate:        a,
+		Workers:     4,
+		MaxRequests: 200,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	n := 0
+	for range d.Run(ctx) {
+		n++
+	}
+	if n != 200 {
+		t.Fatalf("delivered %d/200 — one NaN tick permanently parked the workers", n)
+	}
+}
+
 // TestPacingAdherence asserts the achieved rate is within ±5% of the offered
 // rate. It is env-gated because it needs an idle machine: on a busy CI runner it
 // measures the runner, not metronome. Run it deliberately:

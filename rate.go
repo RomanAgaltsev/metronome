@@ -77,9 +77,11 @@ func NewAdaptive(initial float64) *Adaptive {
 // call concurrently with Rate and from any goroutine.
 //
 // A rate of zero or less is floored by the Driver to a token every ~10,000
-// seconds — effectively paused, but not exactly zero, because a zero-rate
-// limiter cannot be resumed. NaN is treated as the same floor rather than as
-// "unlimited"; see sanitizeRate.
+// seconds: effectively paused, and resumable — a later SetRate takes effect
+// within one rate-update interval (see maxReservationWait), so pausing is not a
+// one-way door. NaN is floored the same way rather than treated as "unlimited",
+// because a control loop dividing by an empty PromQL vector produces NaN and
+// flooding the target is the wrong direction to fail; see sanitizeRate.
 func (a *Adaptive) SetRate(rps float64) {
 	a.rps.Store(math.Float64bits(rps))
 }
