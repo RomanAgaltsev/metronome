@@ -86,6 +86,75 @@ func TestSnapshotReportsClampedCount(t *testing.T) {
 	}
 }
 
+// Clamped counts Results, so it can never exceed Count. It used to be incremented
+// once for the raw histogram and again for the corrected one, so a single
+// Driver-produced Result with an out-of-range latency counted twice.
+func TestSnapshotClampedNeverExceedsCount(t *testing.T) {
+	s := NewStats()
+	base := time.Unix(0, 0)
+	s.Record(Result{Scheduled: base, Start: base, Latency: 5 * time.Minute}) // above the 60s bound
+
+	snap := s.Snapshot()
+	if snap.Clamped != 1 {
+		t.Fatalf("Clamped=%d want 1 — one Result clamped once", snap.Clamped)
+	}
+	if snap.Clamped > snap.Count {
+		t.Fatalf("Clamped=%d exceeds Count=%d", snap.Clamped, snap.Count)
+	}
+}
+
+// A raw latency well inside the histogram can still overflow the corrected
+// histogram once the queueing delay is added. That is a different fact about a
+// different number, and conflating the two sends the reader to widen the range
+// for percentiles that were never clamped.
+func TestSnapshotSeparatesCorrectedClamping(t *testing.T) {
+	s := NewStats()
+	base := time.Unix(0, 0)
+	s.Record(Result{Scheduled: base, Start: base.Add(2 * time.Minute), Latency: 10 * time.Millisecond})
+
+	snap := s.Snapshot()
+	if snap.Clamped != 0 {
+		t.Fatalf("Clamped=%d want 0 — the raw 10ms latency is inside [1µs, 60s]", snap.Clamped)
+	}
+	if snap.CorrectedClamped != 1 {
+		t.Fatalf("CorrectedClamped=%d want 1 — 2m10ms is above the 60s bound", snap.CorrectedClamped)
+	}
+}
+
+func TestSnapshotCountsSaturation(t *testing.T) {
+	s := NewStats()
+	base := time.Unix(0, 0)
+	s.Record(Result{Start: base, Latency: 10 * time.Millisecond})
+	s.Record(Result{Start: base.Add(time.Second), Latency: time.Millisecond, Err: ErrSaturated})
+	s.Record(Result{Start: base.Add(2 * time.Second), Latency: time.Millisecond, Err: errors.New("target said no")})
+
+	snap := s.Snapshot()
+	if snap.Errors != 2 {
+		t.Fatalf("Errors=%d want 2", snap.Errors)
+	}
+	if snap.Saturated != 1 {
+		t.Fatalf("Saturated=%d want 1 — generator saturation must be separable from target errors",
+			snap.Saturated)
+	}
+}
+
+// Throughput and RPS must be the same kind of estimate: N Result.Start stamps
+// bound N-1 intervals, so bytes/span (which spends all N samples over N-1
+// intervals) carries exactly the bias Snapshot.RPS was fixed to avoid.
+func TestSnapshotThroughputAgreesWithRPS(t *testing.T) {
+	s := NewStats()
+	base := time.Unix(0, 0)
+	s.Record(Result{Start: base, Latency: time.Millisecond, Bytes: 1000})
+	s.Record(Result{Start: base.Add(time.Second), Latency: time.Millisecond, Bytes: 1000})
+
+	snap := s.Snapshot()
+	want := snap.RPS * float64(snap.Bytes) / float64(snap.Count) // rps x mean bytes/request
+	if math.Abs(snap.Throughput-want) > 1e-9 {
+		t.Fatalf("Throughput=%v want %v (RPS=%v, %d bytes over %d results)",
+			snap.Throughput, want, snap.RPS, snap.Bytes, snap.Count)
+	}
+}
+
 func TestNewStatsRangeWidensTheHistogram(t *testing.T) {
 	s := NewStatsRange(time.Millisecond, 10*time.Minute, 3)
 	s.Record(Result{Start: time.Unix(0, 0), Latency: 5 * time.Minute})
@@ -138,8 +207,12 @@ func TestSnapshotAggregatesBytesAndCodes(t *testing.T) {
 	if snap.Bytes != 5000 {
 		t.Fatalf("Bytes=%d want 5000", snap.Bytes)
 	}
-	if math.Abs(snap.Throughput-5000/1.0) > 1e-6 {
-		t.Fatalf("Throughput=%v want 5000 bytes/sec", snap.Throughput)
+	// 6 Results spanning 1s bound 5 intervals, so RPS is 5 and the mean payload
+	// is 5000/6 bytes; Throughput is their product. (Bytes/span would say 5000,
+	// which is the N/(N-1) bias Snapshot.RPS exists to avoid — see
+	// TestSnapshotThroughputAgreesWithRPS.)
+	if want := 5.0 * 5000 / 6; math.Abs(snap.Throughput-want) > 1e-6 {
+		t.Fatalf("Throughput=%v want %v bytes/sec", snap.Throughput, want)
 	}
 	want := map[string]int64{"200": 3, "500": 1, "429": 1}
 	if !maps.Equal(snap.Codes, want) {

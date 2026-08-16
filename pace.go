@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -44,7 +45,15 @@ func sanitizeRate(rps float64) rate.Limit {
 // *ideal* send time is knowable — lim.Wait only tells you when it returned, not
 // when it should have — and so that the waiting happens on the injected Clock,
 // which is what makes pacing tests deterministic.
+//
+// mu serialises the clock read with the limiter call it feeds. x/time/rate's
+// reserveN sets lim.last = t unconditionally, so a stale t — one goroutine read
+// the clock, then lost the race for the limiter's own mutex — moves the
+// limiter's anchor backwards and the next caller mints tokens for an interval
+// that has already elapsed. The bias is one-directional: it drives faster than
+// asked, which is the worst direction for a tool whose product is accuracy.
 type pacer struct {
+	mu    sync.Mutex
 	lim   *rate.Limiter
 	clock Clock
 }
@@ -61,8 +70,13 @@ func newPacer(clock Clock, rps float64, burst int) *pacer {
 // the point. It returns ctx.Err() if ctx is done first, cancelling the
 // reservation so the token is not lost.
 func (p *pacer) next(ctx context.Context) (time.Time, error) {
+	// Held only across the two calls that must agree on "now" — never across the
+	// sleep below, which would serialise every worker onto one schedule slot.
+	p.mu.Lock()
 	now := p.clock.Now()
 	rsv := p.lim.ReserveN(now, 1)
+	p.mu.Unlock()
+
 	if !rsv.OK() {
 		// Only possible with burst < 1, which newPacer prevents.
 		return time.Time{}, errors.New("metronome: rate limiter burst is too small for one event")
@@ -77,8 +91,12 @@ func (p *pacer) next(ctx context.Context) (time.Time, error) {
 	return scheduled, nil
 }
 
-// setRate applies a new limit as of now. It takes the time explicitly so the
-// limiter stays on the injected Clock rather than falling back to time.Now.
-func (p *pacer) setRate(now time.Time, rps float64) {
-	p.lim.SetLimitAt(now, sanitizeRate(rps))
+// setRate applies a new limit. It reads the injected Clock itself, under the
+// same lock next uses: SetLimitAt also anchors the limiter to the timestamp it
+// is given, so passing in a separately-read "now" would reintroduce exactly the
+// backwards-anchor bug the lock exists to prevent.
+func (p *pacer) setRate(rps float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lim.SetLimitAt(p.clock.Now(), sanitizeRate(rps))
 }

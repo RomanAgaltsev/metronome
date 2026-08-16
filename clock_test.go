@@ -116,8 +116,15 @@ func TestManualClockSleepHonoursContext(t *testing.T) {
 		t.Fatal("Sleep ignored cancellation")
 	}
 
-	// The abandoned sleeper must be deregistered, or every later Advance drags
-	// a dead waiter along and BlockUntilSleepers over-counts.
+	// The abandoned sleeper must be deregistered, or every later Advance drags a
+	// dead waiter along and BlockUntilSleepers over-counts. Assert on the waiter
+	// list directly: BlockUntilSleepers(0) loops `for len(waiters) < 0`, so it
+	// returns immediately however many stale waiters are left and proves nothing.
 	m.Advance(time.Hour) // must not panic on a closed/stale waiter
-	m.BlockUntilSleepers(0)
+	m.mu.Lock()
+	left := len(m.waiters)
+	m.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d waiters left after a cancelled Sleep; the abandoned sleeper was not deregistered", left)
+	}
 }

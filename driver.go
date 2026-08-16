@@ -129,8 +129,8 @@ func (d *Driver) runUpdater(ctx context.Context, cfg runConfig) {
 		if err := cfg.clock.Sleep(ctx, rateUpdateInterval); err != nil {
 			return
 		}
-		now := cfg.clock.Now()
-		cfg.pacer.setRate(now, d.Rate.Rate(now.Sub(cfg.start)))
+		elapsed := cfg.clock.Now().Sub(cfg.start)
+		cfg.pacer.setRate(d.Rate.Rate(elapsed))
 	}
 }
 

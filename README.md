@@ -66,6 +66,7 @@ abandoning a live channel leaks the workers.
 | `Burst` | rate-limiter burst size; 0 means 1 (smoothest schedule) |
 | `ErrSaturated` | open-loop marker: no worker was free at the scheduled time |
 | `Stats` / `Snapshot` | HDR-histogram percentiles, error rate, achieved rps, bytes/codes |
+| `Snapshot.Saturated` | how much of the error rate was the generator, not the target |
 | `Snapshot.Corrected*` | coordinated-omission-corrected percentiles (see the caveat below) |
 | `Clock` / `ManualClock` | injected time, for deterministic tests |
 
@@ -91,8 +92,9 @@ the target sags). Two consequences:
 One dispatcher keeps the schedule and never blocks on the target. A unit that finds
 no free worker is delivered immediately as a `Result` whose `Err` matches
 `errors.Is(err, metronome.ErrSaturated)`. Saturation therefore shows up as
-`Snapshot.ErrorRate`, not as invisible sag. `Workers` becomes the maximum in-flight
-cap.
+`Snapshot.ErrorRate`, not as invisible sag — and `Snapshot.Saturated` counts it
+separately, so "my generator ran out of workers" stays distinguishable from "the
+target failed". `Workers` becomes the maximum in-flight cap.
 
 Open loop paces from **one** dispatcher goroutine, which sleeps once per unit of
 work. Below roughly a 250µs interval that sleep costs more than the interval, and the

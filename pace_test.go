@@ -91,6 +91,49 @@ func TestPacerSchedulesOnTheClock(t *testing.T) {
 	}
 }
 
+// This is a characterisation test of golang.org/x/time/rate, and it is the whole
+// justification for pacer.mu. It is deterministic — no goroutines, no wall clock
+// — because the effect it pins is a property of the limiter, not of scheduling.
+//
+// reserveN sets lim.last = t unconditionally and advance() clamps its anchor
+// backwards when t precedes it. So if a caller reads the clock and then loses
+// the race for the limiter's own mutex, its stale timestamp rewinds the anchor,
+// and the NEXT caller is credited with tokens for an interval that has already
+// been spent. The bias is one-directional: the limiter hands out more than the
+// rate allows, i.e. metronome drives faster than it was asked to.
+//
+// If this test ever fails, x/time/rate changed its anchoring rules — re-derive
+// whether pacer.mu is still needed rather than deleting the test.
+func TestStaleTimestampRewindsTheLimiterAnchor(t *testing.T) {
+	const perToken = time.Millisecond // 1000 rps
+	base := time.Unix(0, 0)
+	at := base.Add
+
+	// Interleaved: a caller that read the clock at 90ms reserves after one that
+	// read it at 100ms.
+	stale := rate.NewLimiter(rate.Limit(1000), 100)
+	stale.ReserveN(at(100*time.Millisecond), 100) // drain the bucket, anchor at 100ms
+	stale.ReserveN(at(90*time.Millisecond), 1)    // stale: rewinds the anchor to 90ms
+	staleDelay := stale.ReserveN(at(101*time.Millisecond), 1).DelayFrom(at(101 * time.Millisecond))
+
+	// The same three reservations, ordered — what pacer.mu guarantees.
+	ordered := rate.NewLimiter(rate.Limit(1000), 100)
+	ordered.ReserveN(at(100*time.Millisecond), 100)
+	ordered.ReserveN(at(100*time.Millisecond), 1)
+	orderedDelay := ordered.ReserveN(at(101*time.Millisecond), 1).DelayFrom(at(101 * time.Millisecond))
+
+	if orderedDelay != perToken {
+		t.Fatalf("ordered delay %v, want %v — an empty bucket owes one token's wait", orderedDelay, perToken)
+	}
+	if staleDelay != 0 {
+		t.Fatalf("stale delay %v, want 0 — this test no longer demonstrates the rewind", staleDelay)
+	}
+	if staleDelay >= orderedDelay {
+		t.Fatalf("stale delay %v >= ordered delay %v; the rewind no longer over-grants",
+			staleDelay, orderedDelay)
+	}
+}
+
 func TestPacerReturnsContextError(t *testing.T) {
 	m := NewManualClock(time.Unix(0, 0))
 	p := newPacer(m, 1, 1)
