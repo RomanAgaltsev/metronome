@@ -1,6 +1,9 @@
 package metronome
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Result is the outcome of one unit of work.
 type Result struct {
@@ -23,4 +26,17 @@ type Snapshot struct {
 	ErrorRate     float64
 	P50, P95, P99 time.Duration
 	Max           time.Duration
+}
+
+// PanicError reports a panic raised inside a Runner. The Driver recovers it so
+// that one bad unit of work cannot abort a whole load run; the panic is
+// delivered as a failed Result instead, and Stack holds the stack captured at
+// the point of recovery.
+type PanicError struct {
+	Value any
+	Stack []byte
+}
+
+func (e *PanicError) Error() string {
+	return fmt.Sprintf("metronome: runner panicked: %v", e.Value)
 }

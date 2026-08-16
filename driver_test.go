@@ -2,6 +2,7 @@ package metronome
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -96,5 +97,62 @@ func TestDriverAppliesLiveRateUpdates(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("SetRate mid-run not applied: 60 req took %v, want well under 3s", elapsed)
+	}
+}
+
+func TestDriverContainsRunnerPanic(t *testing.T) {
+	var n atomic.Int64
+	d := Driver{
+		Runner: RunnerFunc(func(context.Context) Result {
+			if n.Add(1) == 2 {
+				panic("runner exploded")
+			}
+			return Result{Start: time.Now(), Latency: time.Millisecond}
+		}),
+		Rate:        Constant(1000),
+		Workers:     1,
+		MaxRequests: 3,
+	}
+
+	var results []Result
+	for r := range d.Run(context.Background()) {
+		results = append(results, r)
+	}
+	if len(results) != 3 {
+		t.Fatalf("got %d results, want 3 — a panicking Runner must not abort the run", len(results))
+	}
+
+	var panics int
+	for _, r := range results {
+		var pe *PanicError
+		if errors.As(r.Err, &pe) {
+			panics++
+			if pe.Value != "runner exploded" {
+				t.Errorf("PanicError.Value=%v want %q", pe.Value, "runner exploded")
+			}
+			if len(pe.Stack) == 0 {
+				t.Error("PanicError.Stack is empty")
+			}
+			if r.Start.IsZero() {
+				t.Error("a panicked Result must still carry Start")
+			}
+		}
+	}
+	if panics != 1 {
+		t.Fatalf("got %d PanicError results, want 1", panics)
+	}
+}
+
+func TestDriverStampsStartWhenRunnerForgets(t *testing.T) {
+	d := Driver{
+		Runner:      RunnerFunc(func(context.Context) Result { return Result{} }), // no Start
+		Rate:        Constant(1000),
+		Workers:     1,
+		MaxRequests: 1,
+	}
+	for r := range d.Run(context.Background()) {
+		if r.Start.IsZero() {
+			t.Fatal("Driver must stamp Start when the Runner leaves it zero; Stats' RPS depends on it")
+		}
 	}
 }

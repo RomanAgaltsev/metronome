@@ -2,6 +2,7 @@ package metronome
 
 import (
 	"context"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -99,7 +100,7 @@ func (d *Driver) Run(ctx context.Context) <-chan Result {
 					stop()
 					return
 				}
-				res := d.Runner.Do(ctx) // parent ctx: exhaustion must not cancel in-flight work
+				res := safeDo(ctx, d.Runner, clock) // parent ctx: exhaustion must not cancel in-flight work
 				select {
 				case out <- res:
 					if d.MaxRequests > 0 && n == int64(d.MaxRequests) {
@@ -119,4 +120,25 @@ func (d *Driver) Run(ctx context.Context) <-chan Result {
 	}()
 
 	return out
+}
+
+// safeDo runs r.Do, converting a panic into a failed Result rather than letting
+// it kill the process. It also stamps Start when the Runner left it zero, since
+// Stats derives the achieved rate from Result.Start.
+func safeDo(ctx context.Context, r Runner, clock Clock) (res Result) {
+	start := clock.Now()
+	defer func() {
+		if v := recover(); v != nil {
+			res = Result{
+				Start:   start,
+				Latency: clock.Now().Sub(start),
+				Err:     &PanicError{Value: v, Stack: debug.Stack()},
+			}
+		}
+	}()
+	res = r.Do(ctx)
+	if res.Start.IsZero() {
+		res.Start = start
+	}
+	return res
 }
