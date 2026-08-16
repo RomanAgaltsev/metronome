@@ -59,7 +59,7 @@ func (d *Driver) Run(ctx context.Context) <-chan Result {
 	}
 	start := clock.Now()
 
-	lim := rate.NewLimiter(rate.Limit(max(d.Rate.Rate(0), 0.0001)), 1)
+	lim := rate.NewLimiter(sanitizeRate(d.Rate.Rate(0)), 1)
 	out := make(chan Result)
 
 	// stopCtx releases workers blocked in lim.Wait once MaxRequests is
@@ -82,8 +82,7 @@ func (d *Driver) Run(ctx context.Context) <-chan Result {
 			case <-stopCtx.Done():
 				return
 			case <-t.C:
-				lim.SetLimit(rate.Limit(max(d.Rate.Rate(clock.Now().Local().Sub(start)), 0.0001)))
-
+				lim.SetLimit(sanitizeRate(d.Rate.Rate(clock.Now().Sub(start))))
 			}
 		}
 	})
