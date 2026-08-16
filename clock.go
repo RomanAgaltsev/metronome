@@ -24,6 +24,7 @@ type realClock struct{}
 // Now reports the clock's current time.
 func (realClock) Now() time.Time { return time.Now() }
 
+// Sleep blocks for d, returning nil, or ctx.Err() if ctx is done first.
 func (realClock) Sleep(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return ctx.Err()

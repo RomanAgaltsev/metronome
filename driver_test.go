@@ -260,6 +260,7 @@ func TestDriverClosesPromptlyOnCancel(t *testing.T) {
 		Workers: 2,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // the loop below may exit without reaching its own cancel
 	ch := d.Run(ctx)
 
 	got := 0
@@ -274,7 +275,7 @@ func TestDriverClosesPromptlyOnCancel(t *testing.T) {
 	// documented escape hatch for a caller who stops draining.
 	closed := make(chan struct{})
 	go func() {
-		for range ch { //nolint:revive // draining to close is the point of the test
+		for range ch { // draining to close is the point of the test
 		}
 		close(closed)
 	}()
@@ -341,7 +342,7 @@ func TestDriverPacesDeterministically(t *testing.T) {
 	}
 
 	cancel()
-	for range ch { //nolint:revive // drain to close
+	for range ch { // drain to close
 	}
 }
 
@@ -443,5 +444,86 @@ func TestDriverBurstIsHonoured(t *testing.T) {
 	// All five come from the initial burst without the clock advancing at all.
 	if n != 5 {
 		t.Fatalf("got %d results from a burst of 5 on a frozen clock, want 5", n)
+	}
+}
+
+// The three v0.2 pieces composed: a schedule kept under a frozen clock, a
+// target that stalls, saturation recorded rather than absorbed, and corrected
+// percentiles that reveal the queueing the raw ones hide.
+func TestOpenLoopSaturationIsMeasuredNotHidden(t *testing.T) {
+	m := NewManualClock(time.Unix(0, 0))
+	release := make(chan struct{})
+
+	d := Driver{
+		Runner: RunnerFunc(func(ctx context.Context) Result {
+			start := m.Now()
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return Result{Start: start, Latency: 10 * time.Millisecond}
+		}),
+		Rate:        Constant(10), // one unit per 100ms
+		Workers:     1,
+		MaxRequests: 4,
+		Pacing:      OpenLoop,
+		Clock:       m,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stats := NewStats()
+	ch := d.Run(ctx)
+
+	// Unit 1 takes the only slot (burst token, no sleep) and blocks in Do.
+	// Units 2, 3 and 4 are dispatched at 100ms, 200ms and 300ms with no slot
+	// free, so each is emitted as ErrSaturated at its scheduled time.
+	//
+	// Each Result is read here, before the next tick and before release is
+	// closed: receiving it is the only barrier proving the dispatcher already
+	// found the slot busy. Advance only wakes the dispatcher — it does not run
+	// it — so closing release first would race the freed slot against unit 4's
+	// dispatch and let unit 4 succeed. Unit 1 cannot emit until release closes,
+	// so every Result read in this loop is a saturated one.
+	for i := range 3 {
+		m.BlockUntilSleepers(2) // the dispatcher and the rate updater
+		m.Advance(100 * time.Millisecond)
+
+		r, ok := <-ch
+		if !ok {
+			t.Fatalf("channel closed after %d saturated Results", i)
+		}
+		if !errors.Is(r.Err, ErrSaturated) {
+			t.Fatalf("unit %d: Err=%v, want ErrSaturated", i+2, r.Err)
+		}
+		stats.Record(r)
+	}
+	close(release)
+
+	collected := make(chan Snapshot, 1)
+	go func() {
+		for r := range ch {
+			stats.Record(r)
+		}
+		collected <- stats.Snapshot()
+	}()
+
+	select {
+	case snap := <-collected:
+		if snap.Count != 4 {
+			t.Fatalf("Count=%d want 4", snap.Count)
+		}
+		if snap.Errors != 3 {
+			t.Fatalf("Errors=%d want 3 saturated attempts", snap.Errors)
+		}
+		if snap.ErrorRate != 0.75 {
+			t.Fatalf("ErrorRate=%v want 0.75 — saturation must be visible in the summary", snap.ErrorRate)
+		}
+		if snap.CorrectedCount != 4 {
+			t.Fatalf("CorrectedCount=%d want 4 — every Result carries Scheduled", snap.CorrectedCount)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run never finished")
 	}
 }
