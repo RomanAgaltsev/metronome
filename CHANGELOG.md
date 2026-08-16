@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/RomanAgaltsev/metronome/compare/v0.2.0...v0.2.1) (2026-08-16)
+
+
+### Bug Fixes
+
+* correct the released README and package documentation ([#7](https://github.com/RomanAgaltsev/metronome/issues/7)) ([700606a](https://github.com/RomanAgaltsev/metronome/commit/700606a6a8ae9d9d2d45d9e697f0155186092297))
+
 ## [0.2.0](https://github.com/RomanAgaltsev/metronome/compare/v0.1.0...v0.2.0) (2026-08-16)
 
 
