@@ -3,6 +3,8 @@ package metronome
 import (
 	"context"
 	"errors"
+	"math"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -154,5 +156,54 @@ func TestDriverStampsStartWhenRunnerForgets(t *testing.T) {
 		if r.Start.IsZero() {
 			t.Fatal("Driver must stamp Start when the Runner leaves it zero; Stats' RPS depends on it")
 		}
+	}
+}
+
+func TestDriverBuffersResults(t *testing.T) {
+	d := Driver{
+		Runner:      RunnerFunc(func(context.Context) Result { return Result{Start: time.Now()} }),
+		Rate:        Constant(math.Inf(1)),
+		Workers:     1,
+		MaxRequests: 64,
+	}
+	ch := d.Run(context.Background())
+
+	// With the default buffer the producers run ahead of a consumer that has not
+	// read anything yet. Poll rather than sleep-and-hope.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(ch) == 0 && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	if len(ch) == 0 {
+		t.Fatal("result channel never buffered anything; Run is still synchronous")
+	}
+
+	got := 0
+	for range ch {
+		got++
+	}
+	if got != 64 {
+		t.Fatalf("got %d results, want 64", got)
+	}
+}
+
+func TestDriverUnbufferedWhenRequested(t *testing.T) {
+	d := Driver{
+		Runner:       RunnerFunc(func(context.Context) Result { return Result{Start: time.Now()} }),
+		Rate:         Constant(1000),
+		Workers:      1,
+		MaxRequests:  4,
+		ResultBuffer: -1,
+	}
+	ch := d.Run(context.Background())
+	if cap(ch) != 0 {
+		t.Fatalf("cap=%d want 0 for ResultBuffer=-1", cap(ch))
+	}
+	got := 0
+	for range ch {
+		got++
+	}
+	if got != 4 {
+		t.Fatalf("got %d results, want 4", got)
 	}
 }

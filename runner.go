@@ -3,6 +3,7 @@ package metronome
 import (
 	"context"
 	"math/rand/v2"
+	"slices"
 )
 
 // Runner is one unit of work. The integration seam for request executors.
@@ -26,6 +27,12 @@ type Weighted struct {
 // It panics if no runners are given, a weight is negative, or all weights are
 // zero - programmer errors and Runner has no error path to report them.
 func Mix(ws ...Weighted) Runner {
+	// The caller may retain and mutate the slice they passed (a variadic call
+	// site like Mix(cfg...) hands us their slice, not a copy), which would make
+	// the precomputed total stale and silently bias every draw toward the last
+	// runner.
+	ws = slices.Clone(ws)
+
 	total := 0
 	for _, w := range ws {
 		if w.Weight < 0 {

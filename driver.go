@@ -12,6 +12,10 @@ import (
 
 const defWorkers int = 10
 
+// DefaultResultBuffer is the capacity of Run's result channel when
+// Driver.ResultBuffer is zero.
+const DefaultResultBuffer = 1024
+
 // Driver runs a Runner under a RateController across Workers goroutines,
 // emitting Results on the returned channel until ctx is cancelled or
 // MaxRequests results have been produced (MaxRequests == 0 means unlimited).
@@ -26,6 +30,14 @@ type Driver struct {
 	Workers     int
 	MaxRequests int
 	Clock       Clock
+
+	// ResultBuffer is the capacity of the channel Run returns. Zero selects
+	// DefaultResultBuffer; a negative value selects an unbuffered channel.
+	//
+	// Buffering matters for measurement, not just throughput: on an unbuffered
+	// channel a consumer that pauses blocks a worker that is holding a
+	// rate-limiter token, producing rate sag the target did not cause.
+	ResultBuffer int
 }
 
 // Run starts the workers and returns the channel Results are delivered on.
@@ -61,7 +73,15 @@ func (d *Driver) Run(ctx context.Context) <-chan Result {
 	start := clock.Now()
 
 	lim := rate.NewLimiter(sanitizeRate(d.Rate.Rate(0)), 1)
-	out := make(chan Result)
+
+	buffer := d.ResultBuffer
+	switch {
+	case buffer == 0:
+		buffer = DefaultResultBuffer
+	case buffer < 0:
+		buffer = 0
+	}
+	out := make(chan Result, buffer)
 
 	// stopCtx releases workers blocked in lim.Wait once MaxRequests is
 	// exhausted. The send path below deliberately selects on the parent ctx,
