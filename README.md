@@ -67,24 +67,67 @@ abandoning a live channel leaks the workers.
 
 ## Pacing model — read this before trusting the numbers
 
-metronome v0.1 is a **closed-loop** generator: each worker waits for a rate-limiter
-token, calls your `Runner`, and only then asks for the next token. That has two
-consequences you must know about, both shared with most simple load tools:
+metronome offers two pacing modes and reports latency two ways. The defaults are
+conservative; the honest defaults for a latency-measuring tool are the other ones.
 
-- **Rate sag.** When the target slows down, all workers sit inside `Do`, tokens go
-  unclaimed, and the *achieved* rate silently falls below the *offered* rate. A run
-  that reports "p95 300ms at 100 rps" may have been delivering 40 rps.
-- **Coordinated omission.** Latency is measured from when the request actually
-  started, not from when it *should* have started per the schedule. Every stall in
-  the target suppresses exactly the samples that would have revealed the stall, so
-  percentiles are systematically optimistic.
+### Closed loop (default)
 
-Compare `Snapshot.RPS` against the rate you asked for on every run. If it is lower,
-your latency numbers are optimistic by roughly the amount of the gap.
+Each worker waits for a rate-limiter token, calls your `Runner`, and only then asks
+for the next token. Simple, self-throttling, and the right choice when *you* are the
+backpressure mechanism (a control loop that deliberately probes for the point where
+the target sags). Two consequences:
 
-An open-loop mode (the schedule never blocks on the target; saturation is recorded
-rather than hidden) and coordinated-omission-corrected percentiles are the subject
-of v0.2.
+- **Rate sag.** When the target slows, workers sit inside `Do`, tokens go unclaimed,
+  and the achieved rate falls below the offered rate — silently.
+- **Coordinated omission.** Latency is measured from when work actually started, so
+  every stall suppresses exactly the samples that would have revealed it.
+
+### Open loop (`Pacing: metronome.OpenLoop`)
+
+One dispatcher keeps the schedule and never blocks on the target. A unit that finds
+no free worker is delivered immediately as a `Result` whose `Err` matches
+`errors.Is(err, metronome.ErrSaturated)`. Saturation therefore shows up as
+`Snapshot.ErrorRate`, not as invisible sag. `Workers` becomes the maximum in-flight
+cap.
+
+### Raw vs corrected percentiles
+
+Every `Result` from a `Driver` carries `Scheduled`, the time it *should* have been
+sent. `Stats` reports both:
+
+- `P50` / `P95` / `P99` — measured from when work started. Optimistic under stall.
+- `CorrectedP50` / `CorrectedP95` / `CorrectedP99` — measured from when the work was
+  *due*, i.e. including the queueing delay a schedule-faithful client would have
+  suffered.
+
+Read them as a pair. A large gap means the generator queued: the raw numbers
+understate what a real client would experience by roughly that amount.
+
+```go
+snap := stats.Snapshot()
+fmt.Printf("p95 %v (corrected %v), achieved %.1f rps, %.1f%% saturated\n",
+	snap.P95, snap.CorrectedP95, snap.RPS, snap.ErrorRate*100)
+```
+
+### Measured accuracy
+
+<!-- Numbers from Task 15's real run; replace the machine line with the real one. -->
+
+Measured on <CPU model>, <OS>, Go <version>, machine otherwise idle
+(`go test -bench . ./...`):
+
+| Offered rate | Closed-loop adherence | Open-loop adherence |
+|---|---|---|
+| 10 rps | <measured> | <measured> |
+| 100 rps | <measured> | <measured> |
+| 1,000 rps | <measured> | <measured> |
+| 5,000 rps | <measured> | <measured> |
+
+Per-request kernel overhead (no-op Runner, unlimited rate): **<measured> ns/op**
+closed-loop, **<measured> ns/op** open-loop — an upper bound of roughly
+**<measured> rps** on this machine. Reproduce with
+`go test -run '^$' -bench . ./...`.
+`
 
 ## Status
 
