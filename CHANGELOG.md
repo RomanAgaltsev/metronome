@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/RomanAgaltsev/metronome/compare/v0.3.2...v0.4.0) (2026-08-16)
+
+
+### Features
+
+* summarise a run with Snapshot.String() ([#18](https://github.com/RomanAgaltsev/metronome/issues/18)) ([9d148fb](https://github.com/RomanAgaltsev/metronome/commit/9d148fbb2703e2388015e7813ad3d4677070d300))
+
 ## [0.3.2](https://github.com/RomanAgaltsev/metronome/compare/v0.3.1...v0.3.2) (2026-08-16)
 
 
