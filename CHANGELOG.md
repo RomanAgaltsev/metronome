@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/RomanAgaltsev/metronome/compare/v0.3.0...v0.3.1) (2026-08-16)
+
+
+### Bug Fixes
+
+* a zero, negative or NaN rate is a pause you can come back from ([#13](https://github.com/RomanAgaltsev/metronome/issues/13)) ([1b130c5](https://github.com/RomanAgaltsev/metronome/commit/1b130c55be60b68a74e4da98efce733548dc5436))
+
 ## [0.3.0](https://github.com/RomanAgaltsev/metronome/compare/v0.2.2...v0.3.0) (2026-08-16)
 
 
