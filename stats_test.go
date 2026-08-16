@@ -121,6 +121,18 @@ func TestSnapshotSeparatesCorrectedClamping(t *testing.T) {
 	}
 }
 
+func TestSnapshotTracksMaxScheduleLag(t *testing.T) {
+	s := NewStats()
+	base := time.Unix(0, 0)
+	s.Record(Result{Scheduled: base, Start: base.Add(10 * time.Millisecond), Latency: time.Millisecond})
+	s.Record(Result{Scheduled: base, Start: base.Add(250 * time.Millisecond), Latency: time.Millisecond})
+	s.Record(Result{Scheduled: base.Add(time.Second), Start: base, Latency: time.Millisecond}) // early
+
+	if got := s.Snapshot().MaxScheduleLag; got != 250*time.Millisecond {
+		t.Fatalf("MaxScheduleLag=%v want 250ms (an early unit must not count as negative lag)", got)
+	}
+}
+
 func TestSnapshotCountsSaturation(t *testing.T) {
 	s := NewStats()
 	base := time.Unix(0, 0)

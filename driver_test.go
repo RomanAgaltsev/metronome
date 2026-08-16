@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -566,6 +567,104 @@ func TestOpenLoopSaturationIsMeasuredNotHidden(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the run never finished")
+	}
+}
+
+// The v0.3 acceptance test. Offered 100 rps against a target that takes 50ms with
+// one worker: the generator can only manage ~20 rps, so a client that kept to the
+// 10ms schedule would queue without bound. That queueing is exactly what
+// coordinated-omission correction exists to surface, and in v0.2 it reported zero.
+func TestCorrectedPercentilesRevealClosedLoopSag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive")
+	}
+	const offered = 100.0
+	d := Driver{
+		Runner: RunnerFunc(func(context.Context) Result {
+			time.Sleep(50 * time.Millisecond)
+			return Result{Latency: 50 * time.Millisecond}
+		}),
+		Rate:        Constant(offered),
+		Workers:     1,
+		MaxRequests: 20,
+	}
+	s := NewStats()
+	for r := range d.Run(context.Background()) {
+		s.Record(r)
+	}
+	snap := s.Snapshot()
+
+	if snap.RPS > offered/2 {
+		t.Fatalf("achieved %.1f rps of %.0f offered; this test needs a sagging run", snap.RPS, offered)
+	}
+	if snap.CorrectedP99 <= snap.P99 {
+		t.Fatalf("CorrectedP99=%v <= P99=%v; the correction is inert — Scheduled is still "+
+			"being derived from arrival time", snap.CorrectedP99, snap.P99)
+	}
+	// By the last of 20 units the schedule is ~1s behind, so the corrected tail must
+	// be far above the 50ms of service time, not marginally above it.
+	if snap.CorrectedP99 < 300*time.Millisecond {
+		t.Fatalf("CorrectedP99=%v; want well above the 50ms service time", snap.CorrectedP99)
+	}
+	if snap.MaxScheduleLag < 300*time.Millisecond {
+		t.Fatalf("MaxScheduleLag=%v; the generator fell ~1s behind its own schedule",
+			snap.MaxScheduleLag)
+	}
+}
+
+// H2, deterministically: a generator that cannot hold its own interval is late,
+// and that lateness must be reported. Advancing the manual clock in 500ms steps
+// against a 100ms schedule IS a pacer that runs 400ms late, with no wall-clock
+// timing involved.
+func TestDriverReportsGeneratorLagUnderAManualClock(t *testing.T) {
+	m := NewManualClock(time.Unix(0, 0))
+	d := Driver{
+		Runner:      RunnerFunc(func(context.Context) Result { return Result{Latency: time.Millisecond} }),
+		Rate:        Constant(10), // one unit per 100ms
+		Workers:     1,
+		MaxRequests: 3,
+		Clock:       m,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	base := time.Unix(0, 0)
+	s := NewStats()
+	ch := d.Run(ctx)
+
+	first, ok := <-ch // due at 0, dispatched at 0
+	if !ok {
+		t.Fatal("channel closed before the first result")
+	}
+	s.Record(first)
+
+	// The worker is now asleep waiting for the unit due at 100ms, and so is the
+	// rate updater. Jumping 500ms makes the pacer late by construction: the
+	// limiter's bucket has refilled, so the units due at 100ms and 200ms are
+	// both dispatched at 500ms.
+	m.BlockUntilSleepers(2)
+	m.Advance(500 * time.Millisecond)
+
+	var scheduled []time.Duration
+	for r := range ch {
+		scheduled = append(scheduled, r.Scheduled.Sub(base))
+		s.Record(r)
+	}
+
+	want := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}
+	if !slices.Equal(scheduled, want) {
+		t.Fatalf("Scheduled times %v, want %v — the schedule must advance one interval per "+
+			"unit, not jump to the time the pacer happened to arrive", scheduled, want)
+	}
+
+	snap := s.Snapshot()
+	// The unit due at 100ms started at 500ms: 400ms late, and nothing about the
+	// target caused it.
+	if snap.MaxScheduleLag != 400*time.Millisecond {
+		t.Fatalf("MaxScheduleLag=%v want exactly 400ms", snap.MaxScheduleLag)
+	}
+	if snap.Saturated != 0 {
+		t.Fatalf("Saturated=%d want 0 — the target was never the problem", snap.Saturated)
 	}
 }
 

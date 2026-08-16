@@ -66,7 +66,8 @@ abandoning a live channel leaks the workers.
 | `Burst` | rate-limiter burst size; 0 means 1 (smoothest schedule) |
 | `ErrSaturated` | open-loop marker: no worker was free at the scheduled time |
 | `Stats` / `Snapshot` | HDR-histogram percentiles, error rate, achieved rps, bytes/codes |
-| `Snapshot.Saturated` | how much of the error rate was the generator, not the target |
+| `Snapshot.Saturated` | how much of the error rate was the target refusing work |
+| `Snapshot.MaxScheduleLag` | how far the generator itself fell behind its own schedule |
 | `Snapshot.Corrected*` | coordinated-omission-corrected percentiles (see the caveat below) |
 | `Clock` / `ManualClock` | injected time, for deterministic tests |
 
@@ -100,10 +101,11 @@ Open loop paces from **one** dispatcher goroutine, which sleeps once per unit of
 work. Below roughly a 250µs interval that sleep costs more than the interval, and the
 dispatcher — not the target — becomes the bottleneck: on the machine measured below,
 open loop holds 1,000 rps exactly and delivers only **74% of 5,000 rps**, with zero
-`ErrSaturated` results, because the target was never asked. Closed loop does not have
-this ceiling (its `Workers` goroutines sleep concurrently, so each individual sleep is
-`Workers` times longer). Above ~1,000 rps, compare `Snapshot.RPS` against the rate you
-asked for, and prefer closed loop if the gap matters more than schedule fidelity.
+`ErrSaturated` results, because the target was never asked. `Snapshot.MaxScheduleLag`
+is what makes that visible; see the table below. Closed loop does not have this ceiling
+(its `Workers` goroutines sleep concurrently, so each individual sleep is `Workers`
+times longer). Above ~1,000 rps, check `MaxScheduleLag`, and prefer closed loop if
+throughput matters more to you than schedule fidelity.
 
 ### Raw vs corrected percentiles
 
@@ -120,23 +122,36 @@ understate what a real client would experience by roughly that amount.
 
 ```go
 snap := stats.Snapshot()
-fmt.Printf("p95 %v (corrected %v), achieved %.1f rps, %.1f%% saturated\n",
-	snap.P95, snap.CorrectedP95, snap.RPS, snap.ErrorRate*100)
+fmt.Printf("p95 %v (corrected %v), achieved %.1f rps, %v behind schedule\n",
+	snap.P95, snap.CorrectedP95, snap.RPS, snap.MaxScheduleLag)
 ```
 
-> **Known limitation in v0.2 — do not rely on `Corrected*` yet.**
-> `Scheduled` is currently derived from the moment the pacer *arrives* plus whatever
-> delay the rate limiter still owes. When the generator is running behind, the limiter
-> already holds a token, that delay is zero, and `Scheduled` collapses onto `Start`.
-> The queueing delay is therefore recorded as zero in exactly the situation that
-> creates it, and `CorrectedP50/P95/P99` come back equal to `P50/P95/P99`. Measured:
-> one worker offered 100 rps against a 50ms target achieves 19.9 rps, and reports
-> `P99 = CorrectedP99 = 50.0ms`. `Burst` does not change this.
->
-> Until this is fixed, compare `Snapshot.RPS` against the rate you asked for — that
-> gap is the honest sag signal. Anchoring the schedule to a fixed origin (so a late
-> arrival is measured against the schedule instead of redefining it) is the subject of
-> v0.3.
+The schedule is **anchored**: `Scheduled` is the run's origin plus one interval per
+unit dispatched, advanced whether or not the generator got there on time. A late
+generator is therefore *measured against* the schedule rather than redefining it. One
+worker offered 100 rps against a 50ms target achieves 19.9 rps and reports:
+
+```
+raw       P50=50.0ms  P99=50.0ms
+corrected P50=412.9ms P99=816.1ms   MaxScheduleLag=765.7ms
+```
+
+The 816ms is the honest number: by the twentieth request, a client that kept to the
+10ms schedule would have been waiting that long. (Before v0.3 both lines read 50ms.)
+
+### Who fell behind — you or the target?
+
+`Snapshot.Saturated` and `Snapshot.MaxScheduleLag` answer that between them:
+
+| `Saturated` | `MaxScheduleLag` | Meaning |
+|---|---|---|
+| 0 | ~0 | the schedule was kept and the target kept up |
+| > 0 | ~0 | the **target** could not keep up — open loop working as designed |
+| 0 | large | the **generator** could not keep up — lower the rate, or use closed loop |
+
+The third row is why `MaxScheduleLag` exists: `ErrSaturated` can only report a target
+that was too slow, never a dispatcher that was. At 5,000 rps open loop reports
+`Saturated=0, MaxScheduleLag=330ms` — nothing was wrong with the target.
 
 ### Measured accuracy
 
@@ -151,7 +166,10 @@ machine otherwise idle. Adherence is achieved rps ÷ offered rps; 1.00 is perfec
 | 5,000 rps | 1.00 | **0.74** |
 
 The 0.74 is real and reproducible, and it is a limit of the generator, not of the
-target — see the open-loop note above. Reproduce with:
+target — see the open-loop note above. That run reports `Saturated=0` and
+`MaxScheduleLag=330ms`, which is how you would tell without reading this table.
+Anchoring the schedule in v0.3 made the shortfall *visible*, not smaller: the
+adherence numbers are unchanged from v0.2. Reproduce with:
 
 ```bash
 go test -run '^$' -bench BenchmarkDriverPaced -benchtime 3x ./...
@@ -170,7 +188,7 @@ go test -run '^$' -bench 'BenchmarkDriverOverhead|BenchmarkStatsRecord' ./...
 
 ## Status
 
-v0.2 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
+v0.3 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
 versions may carry small breaking changes**, always with a migration note in the
 CHANGELOG. Pin an exact version.
 

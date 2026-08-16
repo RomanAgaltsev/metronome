@@ -27,14 +27,19 @@
 // # Raw and corrected percentiles
 //
 // Every Result produced by a Driver carries [Result.Scheduled], the time the unit was
-// due. [Stats] reports raw percentiles (P50/P95/P99, measured from when work started)
-// alongside coordinated-omission-corrected ones (CorrectedP50/P95/P99, measured from
-// when the work was due).
+// due. The schedule is anchored: Scheduled is the run's origin plus one interval per
+// unit dispatched, advanced whether or not the generator got there on time, so a late
+// generator is measured against the schedule rather than redefining it.
 //
-// In this version the correction is inert under rate sag: Scheduled is derived from
-// the pacer's arrival time plus the limiter's outstanding delay, so a late pacer finds
-// that delay zero and stamps Scheduled onto Start. The corrected percentiles then
-// equal the raw ones in exactly the case that should separate them. Do not rely on
-// Corrected* in v0.2 — use the gap between [Snapshot.RPS] and your offered rate as the
-// sag signal instead. Anchoring the schedule is the subject of v0.3; see the README.
+// [Stats] reports raw percentiles (P50/P95/P99, from when work started) alongside
+// coordinated-omission-corrected ones (CorrectedP50/P95/P99, from when the work was
+// due). Read them as a pair: a large gap means the generator queued, and the raw
+// numbers understate what a real client would have suffered by roughly that much.
+//
+// # Diagnosing a run that fell short
+//
+// [Snapshot.Saturated] counts units the target had no free worker for;
+// [Snapshot.MaxScheduleLag] is how far the generator itself fell behind. Saturation
+// with no lag means the target could not keep up. Lag with no saturation means
+// metronome could not — lower the rate, or use ClosedLoop.
 package metronome

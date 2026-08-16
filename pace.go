@@ -56,6 +56,26 @@ type pacer struct {
 	mu    sync.Mutex
 	lim   *rate.Limiter
 	clock Clock
+
+	// nominal is the send time of the NEXT unit: the run's origin plus one
+	// interval for every unit dispatched so far. It advances independently of
+	// when next is actually called, which is what makes it an anchor — see
+	// next's comment. Zero before the first unit.
+	nominal time.Time
+}
+
+// intervalOf is the nominal gap between consecutive units at limit. A zero
+// interval means "no schedule": rate.Inf demands everything immediately, so
+// nothing can be late against it.
+//
+// Truncating to whole nanoseconds drifts by under 1ns per unit even for an
+// irrational interval (3 rps), i.e. 0.3ms over a million units against a
+// schedule measured in milliseconds. Accepted.
+func intervalOf(limit rate.Limit) time.Duration {
+	if limit <= 0 || math.IsInf(float64(limit), 1) {
+		return 0
+	}
+	return time.Duration(float64(time.Second) / float64(limit))
 }
 
 func newPacer(clock Clock, rps float64, burst int) *pacer {
@@ -70,25 +90,51 @@ func newPacer(clock Clock, rps float64, burst int) *pacer {
 // the point. It returns ctx.Err() if ctx is done first, cancelling the
 // reservation so the token is not lost.
 func (p *pacer) next(ctx context.Context) (time.Time, error) {
-	// Held only across the two calls that must agree on "now" — never across the
-	// sleep below, which would serialise every worker onto one schedule slot.
-	p.mu.Lock()
-	now := p.clock.Now()
-	rsv := p.lim.ReserveN(now, 1)
-	p.mu.Unlock()
-
-	if !rsv.OK() {
-		// Only possible with burst < 1, which newPacer prevents.
-		return time.Time{}, errors.New("metronome: rate limiter burst is too small for one event")
+	scheduled, delay, rsv, err := p.reserve()
+	if err != nil {
+		return time.Time{}, err
 	}
-
-	delay := rsv.DelayFrom(now)
-	scheduled := now.Add(delay)
 	if err := p.clock.Sleep(ctx, delay); err != nil {
 		rsv.CancelAt(p.clock.Now())
 		return time.Time{}, err
 	}
 	return scheduled, nil
+}
+
+// reserve takes the run's next slot: it reads the clock, claims a token, and
+// advances the nominal schedule, all under one lock. It returns the time the
+// unit was due and how long the caller must wait for it.
+//
+// The lock is held across the clock read and the reservation because
+// x/time/rate anchors the limiter to whatever timestamp it is handed, so a
+// stale one rewinds that anchor and over-grants (see the pacer doc comment). It
+// is deliberately NOT held across the sleep in next, which would serialise every
+// worker onto one schedule slot.
+func (p *pacer) reserve() (scheduled time.Time, delay time.Duration, rsv *rate.Reservation, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := p.clock.Now()
+	rsv = p.lim.ReserveN(now, 1)
+	if !rsv.OK() {
+		// Only possible with burst < 1, which newPacer prevents.
+		return time.Time{}, 0, nil, errors.New("metronome: rate limiter burst is too small for one event")
+	}
+
+	// The schedule is anchored to the run's origin and advances one interval per
+	// unit, independent of when this call actually happened. Deriving it from
+	// arrival instead (now + delay) lets a late pacer redefine the schedule: the
+	// limiter already holds a token, the delay is zero, and the queueing delay
+	// reads as zero in exactly the case that produces it. That is what made
+	// v0.2's corrected percentiles equal to the raw ones.
+	scheduled = p.nominal
+	interval := intervalOf(p.lim.Limit())
+	if scheduled.IsZero() || interval == 0 {
+		scheduled = now // the first unit anchors the run; rate.Inf has no schedule
+	}
+	p.nominal = scheduled.Add(interval)
+
+	return scheduled, rsv.DelayFrom(now), rsv, nil
 }
 
 // setRate applies a new limit. It reads the injected Clock itself, under the

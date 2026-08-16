@@ -91,6 +91,57 @@ func TestPacerSchedulesOnTheClock(t *testing.T) {
 	}
 }
 
+// The schedule is anchored: nominal send times advance by exactly one interval per
+// unit, whatever time the pacer is actually called at. A pacer that arrives late
+// must return a Scheduled time in the PAST, not "now".
+func TestPacerScheduleIsAnchoredNotDerivedFromArrival(t *testing.T) {
+	m := NewManualClock(time.Unix(0, 0))
+	p := newPacer(m, 10, 1) // one unit per 100ms
+	base := time.Unix(0, 0)
+
+	first, err := p.next(context.Background())
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if got := first.Sub(base); got != 0 {
+		t.Fatalf("first scheduled at %v want 0", got)
+	}
+
+	// Jump the clock far past the next unit's due time: the token is waiting, so
+	// next returns immediately — and must report the time the unit was DUE.
+	m.Advance(time.Second)
+	second, err := p.next(context.Background())
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if got := second.Sub(base); got != 100*time.Millisecond {
+		t.Fatalf("second scheduled at %v, want 100ms — the schedule was redefined by a "+
+			"late arrival instead of anchored", got)
+	}
+	if !second.Before(m.Now()) {
+		t.Fatal("a late unit's Scheduled time must be in the past")
+	}
+}
+
+func TestPacerUnlimitedRateHasNoSchedule(t *testing.T) {
+	m := NewManualClock(time.Unix(0, 0))
+	p := newPacer(m, math.Inf(1), 1)
+
+	if _, err := p.next(context.Background()); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	m.Advance(time.Second)
+	got, err := p.next(context.Background())
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	// Nothing is ever late against a schedule that demands everything immediately.
+	if !got.Equal(m.Now()) {
+		t.Fatalf("scheduled %v want %v — an unlimited rate has no schedule to fall behind",
+			got, m.Now())
+	}
+}
+
 // This is a characterisation test of golang.org/x/time/rate, and it is the whole
 // justification for pacer.mu. It is deterministic — no goroutines, no wall clock
 // — because the effect it pins is a property of the limiter, not of scheduling.
