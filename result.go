@@ -26,6 +26,12 @@ type Snapshot struct {
 	ErrorRate     float64
 	P50, P95, P99 time.Duration
 	Max           time.Duration
+
+	// Clamped counts Results whose Latency fell outside the histogram's range
+	// and was clamped to a bound. Non-zero means the percentiles above
+	// understate reality at one end — widen the range with NewStatsRange. Max
+	// always reports the true maximum regardless.
+	Clamped int64
 }
 
 // PanicError reports a panic raised inside a Runner. The Driver recovers it so
