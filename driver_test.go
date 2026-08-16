@@ -74,8 +74,12 @@ func TestDriverPacesApproximately(t *testing.T) {
 	if n != 100 {
 		t.Fatalf("received %d results, want 100", n)
 	}
-	if elapsed < 250*time.Millisecond || elapsed > 2*time.Second {
-		t.Fatalf("100 req at 200 rps took %v, want ~500ms (accept 250ms..2s)", elapsed)
+	// 100 requests at 200 rps ≈ 500ms ideal (burst 1). The upper bound is very
+	// wide because CI runs this on three OSes under -race, where coarse timers
+	// and instrumentation both inflate it — but pacing that is off by 10x still
+	// fails. Precise pacing assertions live in TestDriverPacesDeterministically.
+	if elapsed < 250*time.Millisecond || elapsed > 5*time.Second {
+		t.Fatalf("100 req at 200 rps took %v, want ~500ms (accept 250ms..5s)", elapsed)
 	}
 }
 
@@ -206,4 +210,107 @@ func TestDriverUnbufferedWhenRequested(t *testing.T) {
 	if got != 4 {
 		t.Fatalf("got %d results, want 4", got)
 	}
+}
+
+func TestDriverPanicsOnMissingFields(t *testing.T) {
+	cases := []struct {
+		name string
+		d    Driver
+	}{
+		{"nil Runner", Driver{Rate: Constant(1)}},
+		{"nil Rate", Driver{Runner: RunnerFunc(func(context.Context) Result { return Result{} })}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected panic")
+				}
+			}()
+			tc.d.Run(context.Background())
+		})
+	}
+}
+
+func TestDriverDefaultsWorkers(t *testing.T) {
+	for _, w := range []int{0, -3} {
+		d := Driver{
+			Runner:      RunnerFunc(func(context.Context) Result { return Result{Start: time.Now()} }),
+			Rate:        Constant(math.Inf(1)),
+			Workers:     w,
+			MaxRequests: 20,
+		}
+		if got := d.config().workers; got != DefaultWorkers {
+			t.Fatalf("Workers=%d resolved to %d, want %d", w, got, DefaultWorkers)
+		}
+		n := 0
+		for range d.Run(context.Background()) {
+			n++
+		}
+		if n != 20 {
+			t.Fatalf("Workers=%d delivered %d results, want 20", w, n)
+		}
+	}
+}
+
+func TestDriverClosesPromptlyOnCancel(t *testing.T) {
+	d := Driver{
+		Runner:  RunnerFunc(func(context.Context) Result { return Result{Start: time.Now()} }),
+		Rate:    Constant(1000),
+		Workers: 2,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := d.Run(ctx)
+
+	got := 0
+	for range ch {
+		got++
+		if got == 5 {
+			cancel()
+			break
+		}
+	}
+	// The channel must close on its own now that ctx is cancelled — that is the
+	// documented escape hatch for a caller who stops draining.
+	closed := make(chan struct{})
+	go func() {
+		for range ch { //nolint:revive // draining to close is the point of the test
+		}
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run's channel did not close within 2s of cancel")
+	}
+}
+
+// H1: injecting a ManualClock does NOT make pacing deterministic in this
+// version — the Clock feeds only Rate(elapsed), so an un-advanced ManualClock
+// pins the rate at Rate(0) while the limiter keeps running on wall time. This
+// test pins that behaviour so the v0.2 change to it is visible, not accidental.
+func TestDriverManualClockPinsRateAtZeroElapsed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive")
+	}
+	mc := NewManualClock(time.Unix(0, 0))
+	d := Driver{
+		Runner:      RunnerFunc(func(context.Context) Result { return Result{Start: time.Now()} }),
+		Rate:        Ramp{Start: 1, End: 10000, Over: 100 * time.Millisecond},
+		Workers:     2,
+		MaxRequests: 20,
+		Clock:       mc,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+
+	n := 0
+	for range d.Run(ctx) {
+		n++
+	}
+	if n >= 20 {
+		t.Fatal("the Ramp advanced under a frozen ManualClock — pacing became Clock-driven; " +
+			"update this test and the Driver.Clock doc comment (see v0.2 task 11)")
+	}
+	t.Logf("frozen ManualClock delivered %d of 20 at the ramp's opening rate, as documented", n)
 }

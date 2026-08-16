@@ -10,11 +10,25 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const defWorkers int = 10
-
 // DefaultResultBuffer is the capacity of Run's result channel when
 // Driver.ResultBuffer is zero.
 const DefaultResultBuffer = 1024
+
+// DefaultWorkers is the worker count Run uses when Driver.Workers is not positive.
+const DefaultWorkers = 10
+
+// rateUpdateInterval is how often the limiter is re-read from the RateController.
+const rateUpdateInterval = 100 * time.Millisecond
+
+// runConfig is the resolved, validated form of a Driver for one Run.
+type runConfig struct {
+	workers int
+	buffer  int
+	clock   Clock
+	start   time.Time
+	lim     *rate.Limiter
+	claimed *atomic.Int64
+}
 
 // Driver runs a Runner under a RateController across Workers goroutines,
 // emitting Results on the returned channel until ctx is cancelled or
@@ -29,7 +43,13 @@ type Driver struct {
 	Rate        RateController
 	Workers     int
 	MaxRequests int
-	Clock       Clock
+
+	// Clock supplies elapsed time to Rate. In this version it feeds ONLY
+	// Rate(elapsed): the limiter and the update cadence still run on the wall
+	// clock, so a ManualClock that is never advanced pins the rate at Rate(0)
+	// for the whole run rather than making pacing deterministic. Leave nil for
+	// the wall clock.
+	Clock Clock
 
 	// ResultBuffer is the capacity of the channel Run returns. Zero selects
 	// DefaultResultBuffer; a negative value selects an unbuffered channel.
@@ -38,6 +58,59 @@ type Driver struct {
 	// channel a consumer that pauses blocks a worker that is holding a
 	// rate-limiter token, producing rate sag the target did not cause.
 	ResultBuffer int
+}
+
+// config validates the Driver and resolves its defaults. It panics on nil
+// Runner or Rate: those are programmer errors, and Run has no error return.
+func (d *Driver) config() runConfig {
+	if d.Runner == nil {
+		panic("metronome: Driver.Runner is nil")
+	}
+	if d.Rate == nil {
+		panic("metronome: Driver.Rate is nil")
+	}
+
+	workers := d.Workers
+	if workers <= 0 {
+		workers = DefaultWorkers
+	}
+
+	buffer := d.ResultBuffer
+	switch {
+	case buffer == 0:
+		buffer = DefaultResultBuffer
+	case buffer < 0:
+		buffer = 0
+	}
+
+	clock := d.Clock
+	if clock == nil {
+		clock = realClock{}
+	}
+
+	return runConfig{
+		workers: workers,
+		buffer:  buffer,
+		clock:   clock,
+		start:   clock.Now(),
+		lim:     rate.NewLimiter(sanitizeRate(d.Rate.Rate(0)), 1),
+		claimed: new(atomic.Int64),
+	}
+}
+
+// runUpdater re-reads the RateController every rateUpdateInterval and applies
+// the result to the limiter, so a live SetRate takes effect mid-run.
+func (d *Driver) runUpdater(ctx context.Context, cfg runConfig) {
+	t := time.NewTicker(rateUpdateInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			cfg.lim.SetLimit(sanitizeRate(d.Rate.Rate(cfg.clock.Now().Sub(cfg.start))))
+		}
+	}
 }
 
 // Run starts the workers and returns the channel Results are delivered on.
@@ -51,86 +124,15 @@ type Driver struct {
 //
 // Run panics if Runner or Rate is nil — programmer errors, not runtime
 // conditions. Workers <= 0 defaults to DefaultWorkers.
-//
-//nolint:gocognit // -
 func (d *Driver) Run(ctx context.Context) <-chan Result {
-	if d.Runner == nil {
-		panic("metronome: Driver.Runner is nil")
-	}
-	if d.Rate == nil {
-		panic("metronome: Driver.Rate is nil")
-	}
-
-	workers := d.Workers
-	if workers <= 0 {
-		workers = defWorkers
-	}
-
-	clock := d.Clock
-	if clock == nil {
-		clock = realClock{}
-	}
-	start := clock.Now()
-
-	lim := rate.NewLimiter(sanitizeRate(d.Rate.Rate(0)), 1)
-
-	buffer := d.ResultBuffer
-	switch {
-	case buffer == 0:
-		buffer = DefaultResultBuffer
-	case buffer < 0:
-		buffer = 0
-	}
-	out := make(chan Result, buffer)
-
-	// stopCtx releases workers blocked in lim.Wait once MaxRequests is
-	// exhausted. The send path below deliberately selects on the parent ctx,
-	// NOT stopCtx - exhaustion must never drop an already-produced Result
-	// (selecting on the same ctx that exhaustion cancels would randomly lose
-	// the final results when both select cases are ready).
+	cfg := d.config()
+	out := make(chan Result, cfg.buffer)
 	stopCtx, stop := context.WithCancel(ctx)
 
-	var claimed atomic.Int64
 	var wg sync.WaitGroup
-
-	// Rate updater.
-	wg.Go(func() {
-		t := time.NewTicker(100 * time.Millisecond)
-		defer t.Stop()
-
-		for {
-			select {
-			case <-stopCtx.Done():
-				return
-			case <-t.C:
-				lim.SetLimit(sanitizeRate(d.Rate.Rate(clock.Now().Sub(start))))
-			}
-		}
-	})
-
-	// Workers
-	for range workers {
-		wg.Go(func() {
-			for {
-				if err := lim.Wait(stopCtx); err != nil {
-					return
-				}
-				n := claimed.Add(1)
-				if d.MaxRequests > 0 && n > int64(d.MaxRequests) {
-					stop()
-					return
-				}
-				res := safeDo(ctx, d.Runner, clock) // parent ctx: exhaustion must not cancel in-flight work
-				select {
-				case out <- res:
-					if d.MaxRequests > 0 && n == int64(d.MaxRequests) {
-						stop() // last result delivered: release workers still in lim.Wait
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		})
+	wg.Go(func() { d.runUpdater(stopCtx, cfg) })
+	for range cfg.workers {
+		wg.Go(func() { d.runClosedLoopWorker(ctx, stopCtx, stop, cfg, out) })
 	}
 
 	go func() {
@@ -138,7 +140,6 @@ func (d *Driver) Run(ctx context.Context) <-chan Result {
 		stop()
 		close(out)
 	}()
-
 	return out
 }
 

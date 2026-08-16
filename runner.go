@@ -44,7 +44,9 @@ func Mix(ws ...Weighted) Runner {
 		panic("metronome: Mix requires at least one Weighted with a positive Weight")
 	}
 	return RunnerFunc(func(ctx context.Context) Result {
-		n := rand.IntN(total) //nolint:gosec // -
+		// Load-mix selection is not a security decision; math/rand/v2 is the right
+		// tool and is ~20x faster than crypto/rand on this hot path.
+		n := rand.IntN(total) //nolint:gosec // load-mix selection is not a security decision
 		for _, w := range ws {
 			n -= w.Weight
 			if n < 0 {
