@@ -48,15 +48,31 @@ type Snapshot struct {
 	Max           time.Duration
 
 	// Clamped counts Results whose Latency fell outside the histogram's range
-	// and was clamped to a bound. Non-zero means the percentiles above
-	// understate reality at one end — widen the range with NewStatsRange. Max
-	// always reports the true maximum regardless.
+	// and was clamped to a bound — at most one per Result. Non-zero means P50,
+	// P95 and P99 understate reality at one end; widen the range with
+	// NewStatsRange. Max always reports the true maximum regardless.
 	Clamped int64
+
+	// CorrectedClamped is the same count for the corrected histogram, which
+	// records Latency plus queueing delay and therefore overflows a bound the
+	// raw latency never reaches. It is counted separately because it says
+	// something about CorrectedP50/P95/P99 only — a run can have
+	// CorrectedClamped > 0 with Clamped == 0 and percentiles that are fine.
+	CorrectedClamped int64
+
+	// Saturated counts Results carrying ErrSaturated: open-loop units that found
+	// no free worker at their scheduled time. They are included in Errors and
+	// ErrorRate, and this field is what separates "my generator ran out of
+	// workers" from "the target failed". Always zero in ClosedLoop.
+	Saturated int64
 
 	// Bytes is the sum of Result.Bytes.
 	Bytes int64
 
-	// Throughput is Bytes/sec over the same span RPS is measured across.
+	// Throughput is bytes/sec: RPS multiplied by the mean Bytes per Result, so
+	// it is the same kind of estimate as RPS rather than a raw total over the
+	// observed span. (Bytes/span would spend all N samples' bytes over the N-1
+	// intervals N timestamps actually bound — the bias RPS avoids.)
 	Throughput float64
 
 	// Codes counts Results by Result.Code. Results with an empty Code are

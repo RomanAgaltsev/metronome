@@ -13,6 +13,13 @@ import (
 // unlimited rate, so the number is Driver plumbing (reservation, channel send,
 // goroutine handoff) and nothing else. ns/op is the per-request cost; its
 // reciprocal is the maximum rate this machine can drive.
+//
+// Run this at the DEFAULT -benchtime. Each iteration of b.N shares one Driver
+// start-up (worker pool, updater, closer), so at a small forced -benchtime the
+// number is start-up cost amortised over a handful of requests: 3x reports
+// ~46,000 ns/op where the real per-request cost is ~425 ns/op, a 100x error.
+// Only BenchmarkDriverPaced below wants a small -benchtime, because each of its
+// iterations is a full one-second load run.
 func BenchmarkDriverOverhead(b *testing.B) {
 	for _, mode := range []struct {
 		name string
@@ -37,6 +44,14 @@ func BenchmarkDriverOverhead(b *testing.B) {
 // BenchmarkDriverPaced reports how closely the achieved rate tracks the offered
 // rate. The "adherence" metric is achieved/offered: 1.00 is perfect, below 1.00
 // means the generator could not keep its own schedule.
+//
+// Every iteration is a full one-second load run, so use a small explicit count:
+//
+//	go test -run '^$' -bench BenchmarkDriverPaced -benchtime 3x ./...
+//
+// The reported adherence is the mean over the iterations, not the last one — a
+// single sample hides the run-to-run variance that matters most at the rates
+// where the generator starts to struggle.
 func BenchmarkDriverPaced(b *testing.B) {
 	for _, mode := range []struct {
 		name string
@@ -45,7 +60,8 @@ func BenchmarkDriverPaced(b *testing.B) {
 		for _, rps := range []float64{10, 100, 1000, 5000} {
 			b.Run(fmt.Sprintf("%s/%.0frps", mode.name, rps), func(b *testing.B) {
 				n := int(rps) // one second of load per iteration
-				var adherence float64
+				var total float64
+				var runs int
 				for b.Loop() {
 					d := Driver{
 						Runner:       RunnerFunc(func(context.Context) Result { return Result{} }),
@@ -59,9 +75,12 @@ func BenchmarkDriverPaced(b *testing.B) {
 					for r := range d.Run(context.Background()) {
 						s.Record(r)
 					}
-					adherence = s.Snapshot().RPS / rps
+					total += s.Snapshot().RPS / rps
+					runs++
 				}
-				b.ReportMetric(adherence, "adherence")
+				if runs > 0 {
+					b.ReportMetric(total/float64(runs), "adherence")
+				}
 			})
 		}
 	}

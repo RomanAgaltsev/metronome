@@ -45,18 +45,23 @@ func (d *Driver) runOpenLoop(ctx, stopCtx context.Context, stop context.CancelFu
 
 		// MaxRequests counts dispatched units including saturated ones: a
 		// saturated attempt was an attempt, and counting only completions would
-		// make a saturated run take unboundedly long.
+		// make a saturated run take unboundedly long. One dispatcher increments
+		// cfg.claimed, so n reaches MaxRequests exactly once and the loop returns
+		// on it below — there is no racing overshoot to guard against here, which
+		// is the difference from the closed-loop worker.
 		n := cfg.claimed.Add(1)
-		if d.MaxRequests > 0 && n > int64(d.MaxRequests) {
-			return
-		}
 
 		select {
 		case <-slots:
 			inflight.Go(func() {
-				defer func() { slots <- struct{}{} }()
 				res := safeDo(ctx, d.Runner, cfg.clock)
 				res.Scheduled = scheduled
+				// Hand the slot back BEFORE emitting. emit can block on a slow
+				// consumer, and holding in-flight capacity while blocked turns
+				// the caller's pause into ErrSaturated Results that blame the
+				// target for it. The send cannot block: this goroutine holds the
+				// only token missing from a buffer of cfg.workers.
+				slots <- struct{}{}
 				emit(res)
 			})
 		default:

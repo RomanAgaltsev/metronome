@@ -1,6 +1,7 @@
 package metronome
 
 import (
+	"errors"
 	"maps"
 	"sync"
 	"time"
@@ -10,18 +11,20 @@ import (
 
 // Stats aggregates Results into percentile Snapshots. Safe for concurrent Record.
 type Stats struct {
-	mu             sync.Mutex
-	hist           *hdr.Histogram
-	count          int64
-	errors         int64
-	clamped        int64
-	first          time.Time
-	last           time.Time
-	maxLat         time.Duration
-	bytes          int64
-	codes          map[string]int64
-	corrected      *hdr.Histogram
-	correctedCount int64
+	mu               sync.Mutex
+	hist             *hdr.Histogram
+	count            int64
+	errors           int64
+	saturated        int64
+	clamped          int64
+	first            time.Time
+	last             time.Time
+	maxLat           time.Duration
+	bytes            int64
+	codes            map[string]int64
+	corrected        *hdr.Histogram
+	correctedCount   int64
+	correctedClamped int64
 }
 
 // NewStats returns Stats recording latencies from 1µs to 60s with 3 significant
@@ -75,6 +78,9 @@ func (s *Stats) Record(r Result) {
 	s.count++
 	if !r.Success() {
 		s.errors++
+		if errors.Is(r.Err, ErrSaturated) {
+			s.saturated++
+		}
 	}
 	s.bytes += r.Bytes
 	if r.Code != "" {
@@ -99,9 +105,12 @@ func (s *Stats) Record(r Result) {
 		if queued < 0 {
 			queued = 0 // ran early: never correct downward
 		}
+		// Counted separately from s.clamped: this says the *corrected*
+		// percentiles hit a bound, which a raw latency well inside the range can
+		// still cause once the queueing delay is added.
 		cv, clamped := s.clampMicros(r.Latency + queued)
 		if clamped {
-			s.clamped++
+			s.correctedClamped++
 		}
 		//nolint:gosec // clampMicros guarantees the value is within the histogram's bounds
 		_ = s.corrected.RecordValue(cv)
@@ -127,10 +136,13 @@ func (s *Stats) Snapshot() Snapshot {
 	// N Result.Start timestamps bound N-1 intervals, so the unbiased rate
 	// estimate is (N-1)/span. Using N/span reports r*N/(N-1) — 10% high at N=11
 	// and 100% high at N=2. A single Result bounds no interval and reports 0.
+	// Throughput is RPS x the mean bytes per Result, so it is the same estimator
+	// as RPS. Bytes/span would spend all N samples' bytes over N-1 intervals and
+	// report the N/(N-1) bias RPS exists to avoid — 2x at N=2.
 	rps, throughput := 0.0, 0.0
 	if span := s.last.Sub(s.first).Seconds(); s.count > 1 && span > 0 {
 		rps = float64(s.count-1) / span
-		throughput = float64(s.bytes) / span
+		throughput = rps * float64(s.bytes) / float64(s.count)
 	}
 
 	errRate := 0.0
@@ -154,12 +166,14 @@ func (s *Stats) Snapshot() Snapshot {
 		RPS:       rps,
 		ErrorRate: errRate,
 		P50:       us(50), P95: us(95), P99: us(99),
-		Max:          s.maxLat,
-		Clamped:      s.clamped,
-		Bytes:        s.bytes,
-		Throughput:   throughput,
-		Codes:        maps.Clone(s.codes),
-		CorrectedP50: corrected(50), CorrectedP95: corrected(95), CorrectedP99: corrected(99),
+		Max:              s.maxLat,
+		Clamped:          s.clamped,
+		CorrectedClamped: s.correctedClamped,
+		Saturated:        s.saturated,
+		Bytes:            s.bytes,
+		Throughput:       throughput,
+		Codes:            maps.Clone(s.codes),
+		CorrectedP50:     corrected(50), CorrectedP95: corrected(95), CorrectedP99: corrected(99),
 		CorrectedCount: s.correctedCount,
 	}
 }

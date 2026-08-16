@@ -139,6 +139,10 @@ func TestDriverContainsRunnerPanic(t *testing.T) {
 			if len(pe.Stack) == 0 {
 				t.Error("PanicError.Stack is empty")
 			}
+			// The rendered message is what a user actually reads in a log.
+			if got, want := pe.Error(), "metronome: runner panicked: runner exploded"; got != want {
+				t.Errorf("PanicError.Error()=%q want %q", got, want)
+			}
 			if r.Start.IsZero() {
 				t.Error("a panicked Result must still carry Start")
 			}
@@ -392,6 +396,43 @@ func TestOpenLoopRecordsSaturation(t *testing.T) {
 	if saturated+completed != 20 {
 		t.Fatalf("dispatched %d units (%d saturated + %d completed), want 20 — "+
 			"MaxRequests counts saturated attempts", saturated+completed, saturated, completed)
+	}
+}
+
+// A consumer that stops reading must not be reported as target saturation. The
+// worker used to hold its in-flight slot across the result send, so a paused
+// consumer consumed open-loop capacity and the dispatcher blamed the target.
+func TestOpenLoopDoesNotBlameTheConsumer(t *testing.T) {
+	d := Driver{
+		Runner:       RunnerFunc(func(context.Context) Result { return Result{Latency: time.Millisecond} }),
+		Rate:         Constant(200),
+		Workers:      2,
+		MaxRequests:  6,
+		Pacing:       OpenLoop,
+		ResultBuffer: -1, // unbuffered: every send waits for this test's reads
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ch := d.Run(ctx)
+	// Pause before reading anything, so the first units finish with nowhere to
+	// put their Results while the schedule keeps ticking.
+	time.Sleep(150 * time.Millisecond)
+
+	var saturated, completed int
+	for r := range ch {
+		if errors.Is(r.Err, ErrSaturated) {
+			saturated++
+		} else {
+			completed++
+		}
+	}
+	if saturated+completed != 6 {
+		t.Fatalf("got %d results, want 6", saturated+completed)
+	}
+	if saturated != 0 {
+		t.Fatalf("%d of 6 units reported ErrSaturated with a fast Runner and a slow consumer; "+
+			"the in-flight slot is being held across the result send", saturated)
 	}
 }
 
