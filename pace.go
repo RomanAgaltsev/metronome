@@ -112,7 +112,7 @@ func newPacer(clock Clock, rps float64, burst int) *pacer {
 // reservation so the token is not lost.
 func (p *pacer) next(ctx context.Context) (time.Time, error) {
 	for {
-		scheduled, delay, rsv, err := p.reserve()
+		s, err := p.reserve()
 		switch {
 		case errors.Is(err, errRateTooLow):
 			// The rate is so low that committing would outlive any plausible
@@ -126,11 +126,36 @@ func (p *pacer) next(ctx context.Context) (time.Time, error) {
 			return time.Time{}, err
 		}
 
-		if err := p.clock.Sleep(ctx, delay); err != nil {
-			rsv.CancelAt(p.clock.Now())
+		if err := p.clock.Sleep(ctx, s.delay); err != nil {
+			s.rsv.CancelAt(p.clock.Now())
+			p.abandon(s)
 			return time.Time{}, err
 		}
-		return scheduled, nil
+		return s.scheduled, nil
+	}
+}
+
+// slot is one reserved place in the schedule.
+type slot struct {
+	scheduled time.Time         // when the unit was due
+	delay     time.Duration     // how long until it may go out
+	rsv       *rate.Reservation // the limiter token, to hand back if abandoned
+	advanced  time.Time         // what reserve set p.nominal to
+}
+
+// abandon undoes the schedule advance of a slot whose unit never went out, so a
+// cancelled wait does not silently skip a place in the schedule — the mirror of
+// the reservation being cancelled alongside it.
+//
+// It rolls back only if nothing has advanced the schedule since. Another worker
+// reserving in the meantime means the schedule has legitimately moved on, and
+// dragging it backwards under a concurrent pacer would be worse than leaking one
+// slot.
+func (p *pacer) abandon(s slot) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.nominal.Equal(s.advanced) {
+		p.nominal = s.scheduled
 	}
 }
 
@@ -143,23 +168,24 @@ func (p *pacer) next(ctx context.Context) (time.Time, error) {
 // stale one rewinds that anchor and over-grants (see the pacer doc comment). It
 // is deliberately NOT held across the sleep in next, which would serialise every
 // worker onto one schedule slot.
-func (p *pacer) reserve() (scheduled time.Time, delay time.Duration, rsv *rate.Reservation, err error) {
+func (p *pacer) reserve() (slot, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	now := p.clock.Now()
-	rsv = p.lim.ReserveN(now, 1)
+	rsv := p.lim.ReserveN(now, 1)
 	if !rsv.OK() {
 		// Only possible with burst < 1, which newPacer prevents.
-		return time.Time{}, 0, nil, errors.New("metronome: rate limiter burst is too small for one event")
+		return slot{}, errors.New("metronome: rate limiter burst is too small for one event")
 	}
 
 	// Hand the token straight back if the unit is further out than we are willing
 	// to commit to, and leave the schedule untouched — an abandoned slot must not
 	// advance it. See maxReservationWait.
-	if delay = rsv.DelayFrom(now); delay > maxReservationWait {
+	delay := rsv.DelayFrom(now)
+	if delay > maxReservationWait {
 		rsv.CancelAt(now)
-		return time.Time{}, delay, nil, errRateTooLow
+		return slot{}, errRateTooLow
 	}
 
 	// The schedule is anchored to the run's origin and advances one interval per
@@ -168,14 +194,24 @@ func (p *pacer) reserve() (scheduled time.Time, delay time.Duration, rsv *rate.R
 	// limiter already holds a token, the delay is zero, and the queueing delay
 	// reads as zero in exactly the case that produces it. That is what made
 	// v0.2's corrected percentiles equal to the raw ones.
-	scheduled = p.nominal
+	scheduled := p.nominal
 	interval := intervalOf(p.lim.Limit())
 	if scheduled.IsZero() || interval == 0 {
 		scheduled = now // the first unit anchors the run; rate.Inf has no schedule
 	}
+
+	// ...but the schedule may never claim a unit was due LATER than it actually
+	// goes out. A burst releases several units at once while the schedule spaces
+	// them one interval apart, which would otherwise leave it permanently
+	// (burst-1) intervals ahead of reality — and every Start-Scheduled after that
+	// is negative, which Stats floors to zero, hiding that much lag for the whole
+	// run. Running early is not something to correct for; running late is.
+	if actual := now.Add(delay); scheduled.After(actual) {
+		scheduled = actual
+	}
 	p.nominal = scheduled.Add(interval)
 
-	return scheduled, delay, rsv, nil
+	return slot{scheduled: scheduled, delay: delay, rsv: rsv, advanced: p.nominal}, nil
 }
 
 // setRate applies a new limit. It reads the injected Clock itself, under the
