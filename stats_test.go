@@ -157,3 +157,53 @@ func TestSnapshotCodesIsACopy(t *testing.T) {
 		t.Fatalf("Codes[200]=%d after a caller mutated a Snapshot; Snapshot must return a copy", got)
 	}
 }
+
+func TestSnapshotCorrectsForCoordinatedOmission(t *testing.T) {
+	s := NewStats()
+	base := time.Unix(0, 0)
+
+	// A schedule of one unit every 10ms that the target stalled on: each unit
+	// starts 100ms after it was due, and then takes 10ms.
+	for i := range 100 {
+		sched := base.Add(time.Duration(i) * 10 * time.Millisecond)
+		s.Record(Result{
+			Scheduled: sched,
+			Start:     sched.Add(100 * time.Millisecond),
+			Latency:   10 * time.Millisecond,
+		})
+	}
+
+	snap := s.Snapshot()
+	if snap.CorrectedCount != 100 {
+		t.Fatalf("CorrectedCount=%d want 100", snap.CorrectedCount)
+	}
+	if snap.P50 < 9*time.Millisecond || snap.P50 > 11*time.Millisecond {
+		t.Fatalf("raw P50=%v want ~10ms (raw percentiles must be unchanged)", snap.P50)
+	}
+	// 10ms of service + 100ms of queueing the naive number hides.
+	if snap.CorrectedP50 < 105*time.Millisecond || snap.CorrectedP50 > 115*time.Millisecond {
+		t.Fatalf("CorrectedP50=%v want ~110ms", snap.CorrectedP50)
+	}
+}
+
+func TestSnapshotCorrectedIsZeroWithoutScheduledStamps(t *testing.T) {
+	s := NewStats()
+	s.Record(Result{Start: time.Unix(0, 0), Latency: 10 * time.Millisecond}) // no Scheduled
+	snap := s.Snapshot()
+	if snap.CorrectedCount != 0 || snap.CorrectedP95 != 0 {
+		t.Fatalf("CorrectedCount=%d CorrectedP95=%v; both must be zero without stamps",
+			snap.CorrectedCount, snap.CorrectedP95)
+	}
+}
+
+func TestSnapshotCorrectedNeverBelowRaw(t *testing.T) {
+	s := NewStats()
+	base := time.Unix(0, 0)
+	// Start *before* Scheduled (the generator ran early): the correction must
+	// floor at zero, not subtract from the measured latency.
+	s.Record(Result{Scheduled: base.Add(time.Second), Start: base, Latency: 10 * time.Millisecond})
+	snap := s.Snapshot()
+	if snap.CorrectedP50 < snap.P50 {
+		t.Fatalf("CorrectedP50=%v < P50=%v; correction must never reduce latency", snap.CorrectedP50, snap.P50)
+	}
+}

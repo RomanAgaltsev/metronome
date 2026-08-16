@@ -55,6 +55,20 @@ type Snapshot struct {
 	// Codes counts Results by Result.Code. Results with an empty Code are
 	// counted in Count but not here. The map is a copy owned by the caller.
 	Codes map[string]int64
+
+	// CorrectedP* are the coordinated-omission-corrected percentiles: each
+	// Result's latency plus the time it spent waiting past its Scheduled send
+	// time. They answer "what would a client that kept to the schedule have
+	// seen?", which is the honest number when the target stalls. They are zero
+	// when no Result carried a Scheduled stamp.
+	//
+	// Read them against the raw P* above: a large gap means the generator
+	// queued, so the raw numbers understate what a real client would suffer.
+	CorrectedP50, CorrectedP95, CorrectedP99 time.Duration
+
+	// CorrectedCount is how many Results carried a Scheduled stamp and are
+	// therefore represented in CorrectedP*.
+	CorrectedCount int64
 }
 
 // PanicError reports a panic raised inside a Runner. The Driver recovers it so

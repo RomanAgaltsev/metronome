@@ -10,16 +10,18 @@ import (
 
 // Stats aggregates Results into percentile Snapshots. Safe for concurrent Record.
 type Stats struct {
-	mu      sync.Mutex
-	hist    *hdr.Histogram
-	count   int64
-	errors  int64
-	clamped int64
-	first   time.Time
-	last    time.Time
-	maxLat  time.Duration
-	bytes   int64
-	codes   map[string]int64
+	mu             sync.Mutex
+	hist           *hdr.Histogram
+	count          int64
+	errors         int64
+	clamped        int64
+	first          time.Time
+	last           time.Time
+	maxLat         time.Duration
+	bytes          int64
+	codes          map[string]int64
+	corrected      *hdr.Histogram
+	correctedCount int64
 }
 
 // NewStats returns Stats recording latencies from 1µs to 60s with 3 significant
@@ -46,8 +48,9 @@ func NewStatsRange(lo, hi time.Duration, sigfigs int) *Stats {
 		panic("metronome: NewStatsRange sigfigs must be in [1, 5]")
 	}
 	return &Stats{
-		hist:  hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs),
-		codes: make(map[string]int64),
+		hist:      hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs),
+		corrected: hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs),
+		codes:     make(map[string]int64),
 	}
 }
 
@@ -87,6 +90,24 @@ func (s *Stats) Record(r Result) {
 	//nolint:gosec // clampMicros guarantees the value is within the histogram's bounds
 	_ = s.hist.RecordValue(v)
 
+	// Coordinated-omission correction: a unit that started late was, from the
+	// schedule's point of view, already in flight while it waited. Results
+	// without a Scheduled stamp (not produced by a Driver) are simply not
+	// represented in the corrected percentiles.
+	if !r.Scheduled.IsZero() {
+		queued := r.Start.Sub(r.Scheduled)
+		if queued < 0 {
+			queued = 0 // ran early: never correct downward
+		}
+		cv, clamped := s.clampMicros(r.Latency + queued)
+		if clamped {
+			s.clamped++
+		}
+		//nolint:gosec // clampMicros guarantees the value is within the histogram's bounds
+		_ = s.corrected.RecordValue(cv)
+		s.correctedCount++
+	}
+
 	if r.Latency > s.maxLat {
 		s.maxLat = r.Latency
 	}
@@ -120,16 +141,25 @@ func (s *Stats) Snapshot() Snapshot {
 	us := func(p float64) time.Duration {
 		return time.Duration(s.hist.ValueAtQuantile(p)) * time.Microsecond
 	}
+	corrected := func(p float64) time.Duration {
+		if s.correctedCount == 0 {
+			return 0
+		}
+		return time.Duration(s.corrected.ValueAtQuantile(p)) * time.Microsecond
+	}
+
 	return Snapshot{
 		Count:     s.count,
 		Errors:    s.errors,
 		RPS:       rps,
 		ErrorRate: errRate,
 		P50:       us(50), P95: us(95), P99: us(99),
-		Max:        s.maxLat,
-		Clamped:    s.clamped,
-		Bytes:      s.bytes,
-		Throughput: throughput,
-		Codes:      maps.Clone(s.codes),
+		Max:          s.maxLat,
+		Clamped:      s.clamped,
+		Bytes:        s.bytes,
+		Throughput:   throughput,
+		Codes:        maps.Clone(s.codes),
+		CorrectedP50: corrected(50), CorrectedP95: corrected(95), CorrectedP99: corrected(99),
+		CorrectedCount: s.correctedCount,
 	}
 }
