@@ -18,7 +18,7 @@ const minRPS = 0.0001
 // sanitizeRate maps a RateController's reported rate onto a limit the limiter
 // can honour.
 //
-// NaN as the dangerous case and the reason this function exists: Go's max
+// NaN is the dangerous case and the reason this function exists: Go's max
 // propagates NaN, so a naive max(rps, minRPS) floor does not catch it and
 // rate.Limit(NaN) makes every Wait and Reserve return immediately - the Driver
 // stops pacing and floods the target. A control loop that divides by an empty
