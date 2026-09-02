@@ -179,6 +179,62 @@ func NewRollingStats(cfg Rolling) *RollingStats {
 	return rs
 }
 
+// rotate advances the ring until curStart is the start of the bucket containing
+// now. The caller holds rs.mu.
+func (rs *RollingStats) rotate(now time.Time) {
+	gap := now.Sub(rs.curStart)
+	if gap < rs.interval {
+		// Still inside the current bucket. A clock that went backwards lands here
+		// too, which is the right answer: never rotate on negative time.
+		return
+	}
+	n := int(gap / rs.interval)
+
+	if n >= len(rs.ring) {
+		// The gap is at least a whole window, so every bucket is stale whatever n
+		// is. Clearing the ring in one pass keeps this O(Buckets): an hour-long
+		// stall against a one-second bucket would otherwise iterate 3,600 times
+		// on the next call.
+		for _, b := range rs.ring {
+			b.reset()
+		}
+		rs.idx, rs.live = 0, 1
+	} else {
+		for range n {
+			rs.idx = (rs.idx + 1) % len(rs.ring)
+			rs.ring[rs.idx].reset()
+		}
+		rs.live = min(rs.live+n, len(rs.ring))
+	}
+
+	// Advance by whole intervals rather than jumping to now, so bucket boundaries
+	// stay anchored to origin instead of drifting by the remainder on every
+	// rotation. The pacer's nominal schedule holds its grid the same way, for the
+	// same reason.
+	rs.curStart = rs.curStart.Add(time.Duration(n) * rs.interval)
+}
+
+// Record adds one Result to both the lifetime aggregate and the current bucket.
+// It is safe to call concurrently.
+func (rs *RollingStats) Record(r Result) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+
+	rs.rotate(rs.clock.Now())
+	rs.life.Record(r)
+	rs.ring[rs.idx].Record(r)
+}
+
+// Snapshot returns the cumulative aggregate over the whole run, with exactly the
+// meaning Stats.Snapshot has: RPS inferred from the Result timestamps and
+// Snapshot.Window zero. Use Window for the trailing view.
+func (rs *RollingStats) Snapshot() Snapshot {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+
+	return rs.life.snapshot(0)
+}
+
 // histogramCounts is the length of the counts array hdr.New allocates for a
 // [lo, hi] range at sigfigs significant digits — the same derivation
 // NewStatsRange triggers, reproduced so a configuration can be priced without

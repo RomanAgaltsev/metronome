@@ -119,3 +119,94 @@ func TestRollingBytesPanicsWhereNewRollingStatsDoes(t *testing.T) {
 	}()
 	_ = Rolling{Window: 5, Buckets: 10}.Bytes()
 }
+
+func TestRollingRecordFeedsBothViews(t *testing.T) {
+	clk := NewManualClock(time.Unix(0, 0))
+	rs := NewRollingStats(Rolling{Window: 4 * time.Second, Buckets: 4, Clock: clk})
+
+	for range 3 {
+		rs.Record(Result{Start: clk.Now(), Latency: time.Millisecond})
+	}
+	clk.Advance(time.Second)
+	for range 5 {
+		rs.Record(Result{Start: clk.Now(), Latency: time.Millisecond})
+	}
+
+	life := rs.Snapshot()
+	if life.Count != 8 {
+		t.Fatalf("lifetime Count=%d want 8", life.Count)
+	}
+	if life.Window != 0 {
+		t.Fatalf("lifetime Window=%v want 0", life.Window)
+	}
+	if got := rs.ring[0].Snapshot().Count; got != 3 {
+		t.Fatalf("ring[0] Count=%d want 3", got)
+	}
+	if got := rs.ring[1].Snapshot().Count; got != 5 {
+		t.Fatalf("ring[1] Count=%d want 5", got)
+	}
+}
+
+func TestRollingRotationStaysAnchoredToOrigin(t *testing.T) {
+	clk := NewManualClock(time.Unix(0, 0))
+	rs := NewRollingStats(Rolling{Window: 10 * time.Second, Buckets: 10, Clock: clk})
+
+	// Ragged steps that never land on a bucket boundary. If rotation reset
+	// curStart to now instead of advancing it by whole intervals, the grid would
+	// drift by the remainder every time.
+	for range 7 {
+		clk.Advance(1400 * time.Millisecond)
+		rs.Record(Result{Start: clk.Now(), Latency: time.Millisecond})
+	}
+
+	// 9.8s elapsed, so nine whole intervals have passed.
+	if got, want := rs.curStart.Sub(rs.origin), 9*time.Second; got != want {
+		t.Fatalf("curStart drifted to %v after 9.8s; want exactly %v", got, want)
+	}
+	if rs.live != 10 {
+		t.Fatalf("live=%d want 10", rs.live)
+	}
+}
+
+func TestRollingGapLongerThanTheWindowClearsTheRing(t *testing.T) {
+	clk := NewManualClock(time.Unix(0, 0))
+	rs := NewRollingStats(Rolling{Window: 10 * time.Second, Buckets: 10, Clock: clk})
+
+	for range 100 {
+		rs.Record(Result{Start: clk.Now(), Latency: time.Millisecond})
+	}
+	clk.Advance(time.Hour) // 3,600 intervals; rotation must not loop 3,600 times
+	rs.Record(Result{Start: clk.Now(), Latency: time.Millisecond})
+
+	if rs.live != 1 {
+		t.Fatalf("live=%d want 1 after a gap longer than the window", rs.live)
+	}
+	if got := rs.ring[rs.idx].Snapshot().Count; got != 1 {
+		t.Fatalf("current bucket Count=%d want 1", got)
+	}
+	total := int64(0)
+	for _, b := range rs.ring {
+		total += b.Snapshot().Count
+	}
+	if total != 1 {
+		t.Fatalf("ring holds %d Results want 1; stale buckets were not reset", total)
+	}
+	if got := rs.Snapshot().Count; got != 101 {
+		t.Fatalf("lifetime Count=%d want 101; the gap must not touch it", got)
+	}
+}
+
+func TestRollingIgnoresAClockThatGoesBackwards(t *testing.T) {
+	clk := NewManualClock(time.Unix(100, 0))
+	rs := NewRollingStats(Rolling{Window: 10 * time.Second, Buckets: 10, Clock: clk})
+
+	clk.Advance(-50 * time.Second)
+	rs.Record(Result{Start: clk.Now(), Latency: time.Millisecond})
+
+	if rs.live != 1 {
+		t.Fatalf("live=%d want 1; a backwards clock must not rotate", rs.live)
+	}
+	if got := rs.ring[rs.idx].Snapshot().Count; got != 1 {
+		t.Fatalf("current bucket Count=%d want 1", got)
+	}
+}
