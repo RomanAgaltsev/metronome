@@ -9,6 +9,11 @@ import (
 	hdr "github.com/HdrHistogram/hdrhistogram-go"
 )
 
+const (
+	bytesPerCount      = 8 // one int64 per histogram bucket count
+	histogramsPerStats = 2 // raw and corrected
+)
+
 // Stats aggregates Results into percentile Snapshots. Safe for concurrent Record.
 type Stats struct {
 	mu               sync.Mutex
@@ -26,6 +31,10 @@ type Stats struct {
 	corrected        *hdr.Histogram
 	correctedCount   int64
 	correctedClamped int64
+
+	// countsLen is the length of each histogram's counts array, derived at
+	// construction. Immutable, so Bytes needs no lock.
+	countsLen int64
 }
 
 // NewStats returns Stats recording latencies from 1µs to 60s with 3 significant
@@ -52,17 +61,10 @@ func NewStatsRange(lo, hi time.Duration, sigfigs int) *Stats {
 		panic("metronome: NewStatsRange sigfigs must be in [1, 5]")
 	}
 	return &Stats{
-		hist: hdr.New(
-			int64(lo/time.Microsecond),
-			int64(hi/time.Microsecond),
-			sigfigs,
-		),
-		corrected: hdr.New(
-			int64(lo/time.Microsecond),
-			int64(hi/time.Microsecond),
-			sigfigs,
-		),
-		codes: make(map[string]int64),
+		hist:      hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs),
+		corrected: hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs),
+		codes:     make(map[string]int64),
+		countsLen: histogramCounts(lo, hi, sigfigs),
 	}
 }
 
@@ -279,4 +281,14 @@ func (s *Stats) merge(src *Stats) {
 	if src.last.After(s.last) {
 		s.last = src.last
 	}
+}
+
+// Bytes reports the memory this Stats holds for its histograms: two count
+// arrays of int64. The surrounding struct, the codes map and the recorded
+// Results are not included — the count arrays dominate and are the term that
+// scales with the range and significant figures.
+//
+// It needs no lock: the length is fixed at construction.
+func (s *Stats) Bytes() int64 {
+	return s.countsLen * bytesPerCount * histogramsPerStats
 }

@@ -308,6 +308,17 @@ func (rs *RollingStats) Window() Snapshot {
 	return rs.scratch.snapshot(rs.covered(now))
 }
 
+// Bytes reports the memory this RollingStats holds for its histograms: the
+// lifetime aggregate, the scratch merge target, and every ring bucket, all
+// built from one Rolling and therefore all the same size.
+//
+// It equals the Rolling.Bytes() of the config it was built from, and needs no
+// lock for the same reason Stats.Bytes does not.
+func (rs *RollingStats) Bytes() int64 {
+	const extraStats = 2 // the lifetime aggregate and the scratch merge target
+	return int64(len(rs.ring)+extraStats) * rs.life.Bytes()
+}
+
 // histogramCounts is the length of the counts array hdr.New allocates for a
 // [lo, hi] range at sigfigs significant digits — the same derivation
 // NewStatsRange triggers, reproduced so a configuration can be priced without
@@ -364,11 +375,7 @@ func histogramCounts(lo, hi time.Duration, sigfigs int) int64 {
 func (cfg Rolling) Bytes() int64 {
 	c := cfg.config()
 
-	const (
-		bytesPerCount      = 8 // int64
-		histogramsPerStats = 2 // raw and corrected
-		extraStats         = 2 // the lifetime aggregate and the scratch merge target
-	)
+	const extraStats = 2 // the lifetime aggregate and the scratch merge target
 	counts := histogramCounts(c.lo, c.hi, c.sigfigs)
 
 	return int64(c.buckets+extraStats) * histogramsPerStats * counts * bytesPerCount
