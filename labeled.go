@@ -178,3 +178,60 @@ func (ls *LabeledStats[R]) Bytes() int64 {
 	}
 	return n
 }
+
+// label picks the series name for r: the configured key's value, or the
+// unlabeled sentinel when there is nothing usable there.
+func (ls *LabeledStats[R]) label(r Result) string {
+	v := r.Labels[ls.cfg.key] // a nil map reads as the zero value
+	if v == "" {
+		return ls.cfg.unlabeled
+	}
+	return v
+}
+
+// child returns the recorder for series v, creating it on first sight, or the
+// overflow series once MaxSeries distinct values already have one.
+func (ls *LabeledStats[R]) child(v string) R {
+	ls.mu.RLock()
+	c, ok := ls.series[v]
+	ls.mu.RUnlock()
+	if ok {
+		return c
+	}
+
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+
+	// Re-check: another goroutine may have created it between the two locks,
+	// and the loser must not discard the winner's child along with whatever has
+	// already been recorded into it.
+	if c, ok = ls.series[v]; ok {
+		return c
+	}
+
+	if ls.named >= ls.cfg.maxSeries {
+		v = ls.cfg.overflow
+		if c, ok = ls.series[v]; ok {
+			return c
+		}
+	} else {
+		ls.named++
+	}
+
+	c = ls.cfg.newChild()
+	ls.series[v] = c
+	return c
+}
+
+// Record adds r to the total and to exactly one series. It is safe to call
+// concurrently.
+func (ls *LabeledStats[R]) Record(r Result) {
+	c := ls.child(ls.label(r))
+
+	// Neither call happens under ls.mu: holding it would serialise every series
+	// through one mutex at whatever rate the run is generating, which is the
+	// contention Stats' own per-instance mutex exists to avoid. The child
+	// pointer is stable once created, so releasing before using it is safe.
+	ls.total.Record(r)
+	c.Record(r)
+}
