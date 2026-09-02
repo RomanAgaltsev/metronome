@@ -211,3 +211,61 @@ func (s *Stats) snapshot(window time.Duration) Snapshot {
 		CorrectedCount:   s.correctedCount,
 	}
 }
+
+// reset returns s to its just-constructed state so a rolling bucket can be
+// recycled. The histograms keep their allocated counts arrays — only the
+// recorded values go — which is the whole reason a ring is affordable.
+func (s *Stats) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.hist.Reset()
+	s.corrected.Reset()
+	s.count, s.errors, s.saturated, s.clamped = 0, 0, 0, 0
+	s.correctedCount, s.correctedClamped = 0, 0
+	s.bytes = 0
+	s.maxLat, s.maxLag = 0, 0
+	s.first, s.last = time.Time{}, time.Time{}
+	clear(s.codes)
+}
+
+// merge folds src into s.
+//
+// The caller must hold exclusive use of s; src is locked for the read. That
+// asymmetry is deliberate and sufficient here: RollingStats only ever merges
+// buckets into its own private scratch Stats, so no two Stats are ever merged
+// into each other and there is no lock-ordering cycle to reason about.
+//
+// Both must have been built from the same histogram range, which every Stats
+// inside one RollingStats is.
+func (s *Stats) merge(src *Stats) {
+	src.mu.Lock()
+	defer src.mu.Unlock()
+
+	// Merge reports values it had to drop for falling outside the destination's
+	// range. Every Stats in a RollingStats is constructed from one Rolling, so
+	// the ranges are identical and this is always zero.
+	_ = s.hist.Merge(src.hist)
+	_ = s.corrected.Merge(src.corrected)
+
+	s.count += src.count
+	s.errors += src.errors
+	s.saturated += src.saturated
+	s.clamped += src.clamped
+	s.correctedCount += src.correctedCount
+	s.correctedClamped += src.correctedClamped
+	s.bytes += src.bytes
+
+	s.maxLat = max(s.maxLat, src.maxLat)
+	s.maxLag = max(s.maxLag, src.maxLag)
+
+	for code, n := range src.codes {
+		s.codes[code] += n
+	}
+	if !src.first.IsZero() && (s.first.IsZero() || src.first.Before(s.first)) {
+		s.first = src.first
+	}
+	if src.last.After(s.last) {
+		s.last = src.last
+	}
+}

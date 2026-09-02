@@ -4,6 +4,7 @@ import (
 	"errors"
 	"maps"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -357,5 +358,80 @@ func TestStatsSnapshotWindowReportsZeroRateWhenEmpty(t *testing.T) {
 	}
 	if got.Window != 5*time.Second {
 		t.Fatalf("Window=%v want 5s", got.Window)
+	}
+}
+
+// buildMergeResults returns a fixed, varied Result set: several latencies, some
+// errors, two codes, byte counts and schedule stamps, so a merge that drops any
+// one field shows up.
+func buildMergeResults() []Result {
+	base := time.Unix(0, 0)
+	out := make([]Result, 0, 300)
+	for i := range 300 {
+		r := Result{
+			Start:     base.Add(time.Duration(i) * time.Millisecond),
+			Scheduled: base.Add(time.Duration(i)*time.Millisecond - time.Duration(i%9)*time.Millisecond),
+			Latency:   time.Duration(i%50+1) * time.Millisecond,
+			Bytes:     int64(i),
+			Code:      [2]string{"200", "500"}[i%2],
+		}
+		if i%7 == 0 {
+			r.Err = errors.New("x")
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func TestStatsMergeEqualsOneStatsFedTheSameResults(t *testing.T) {
+	results := buildMergeResults()
+
+	whole := NewStats()
+	for _, r := range results {
+		whole.Record(r)
+	}
+
+	// The same Results dealt round-robin into three Stats, then merged back.
+	parts := []*Stats{NewStats(), NewStats(), NewStats()}
+	for i, r := range results {
+		parts[i%3].Record(r)
+	}
+	merged := NewStats()
+	for _, p := range parts {
+		merged.merge(p)
+	}
+
+	want, got := whole.Snapshot(), merged.Snapshot()
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("merged snapshot differs\nwant %+v\n got %+v", want, got)
+	}
+}
+
+func TestStatsResetReturnsToTheConstructedState(t *testing.T) {
+	s := NewStats()
+	for _, r := range buildMergeResults() {
+		s.Record(r)
+	}
+	s.reset()
+
+	if got, want := s.Snapshot(), NewStats().Snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("after reset snapshot=%+v want %+v", got, want)
+	}
+}
+
+func TestStatsResetThenRecordIsIndependentOfHistory(t *testing.T) {
+	// A recycled bucket must not let an old maximum survive: this is the exact
+	// defect the rolling window exists to fix, at bucket scope.
+	s := NewStats()
+	s.Record(Result{Start: time.Unix(0, 0), Scheduled: time.Unix(0, 0).Add(-5 * time.Second), Latency: time.Second})
+	s.reset()
+	s.Record(Result{Start: time.Unix(1, 0), Scheduled: time.Unix(1, 0), Latency: time.Millisecond})
+
+	snap := s.Snapshot()
+	if snap.MaxScheduleLag != 0 {
+		t.Fatalf("MaxScheduleLag=%v want 0 after reset", snap.MaxScheduleLag)
+	}
+	if snap.Max != time.Millisecond {
+		t.Fatalf("Max=%v want 1ms after reset", snap.Max)
 	}
 }
