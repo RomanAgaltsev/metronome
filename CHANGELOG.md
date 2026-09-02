@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/RomanAgaltsev/metronome/compare/v0.4.0...v0.5.0) (2026-09-02)
+
+
+### Features
+
+* rolling-window Stats ([#20](https://github.com/RomanAgaltsev/metronome/issues/20)) ([8cc0e0b](https://github.com/RomanAgaltsev/metronome/commit/8cc0e0bce32ae89626219556e369b64df68b6b52))
+
 ## [0.4.0](https://github.com/RomanAgaltsev/metronome/compare/v0.3.2...v0.4.0) (2026-08-16)
 
 
