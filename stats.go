@@ -52,9 +52,15 @@ func NewStatsRange(lo, hi time.Duration, sigfigs int) *Stats {
 		panic("metronome: NewStatsRange sigfigs must be in [1, 5]")
 	}
 	return &Stats{
-		hist:      hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs),
-		corrected: hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs),
-		codes:     make(map[string]int64),
+		hist: hdr.New(int64(lo/time.Microsecond),
+			int64(hi/time.Microsecond),
+			sigfigs,
+		),
+		corrected: hdr.New(int64(lo/time.Microsecond),
+			int64(hi/time.Microsecond),
+			sigfigs,
+		),
+		codes: make(map[string]int64),
 	}
 }
 
@@ -102,10 +108,9 @@ func (s *Stats) Record(r Result) {
 	// without a Scheduled stamp (not produced by a Driver) are simply not
 	// represented in the corrected percentiles.
 	if !r.Scheduled.IsZero() {
-		queued := r.Start.Sub(r.Scheduled)
-		if queued < 0 {
-			queued = 0 // ran early: never correct downward
-		}
+		queued := max(r.Start.Sub(r.Scheduled),
+			// ran early: never correct downward
+			0)
 		if queued > s.maxLag {
 			s.maxLag = queued
 		}
@@ -132,20 +137,39 @@ func (s *Stats) Record(r Result) {
 	}
 }
 
-// Snapshot returns the aggregate so far. Safe to call concurrently with Record.
-func (s *Stats) Snapshot() Snapshot {
+// Snapshot returns the cumulative aggregate so far. Safe to call concurrently
+// with Record.
+func (s *Stats) Snapshot() Snapshot { return s.snapshot(0) }
+
+// snapshot builds a Snapshot over a known or an inferred duration.
+//
+// A positive window means the caller knows how much wall time these Results
+// cover — the rolling-window case — so RPS is count/window. That estimator can
+// report zero, which is what makes a stall visible.
+//
+// A zero window means the duration is unknown and must be inferred from the
+// Result timestamps themselves. N Result.Start timestamps bound N-1 intervals,
+// so the unbiased estimate is (N-1)/span; using N/span reports r*N/(N-1) — 10%
+// high at N=11 and 100% high at N=2. A single Result bounds no interval and
+// reports 0. This estimator cannot represent a stall: no new Results means no
+// new span, and the ratio holds at the last healthy rate.
+//
+// Throughput is RPS x the mean bytes per Result either way, so it is always the
+// same kind of estimate as RPS. Bytes/span would spend all N samples' bytes over
+// N-1 intervals and report the N/(N-1) bias RPS exists to avoid — 2x at N=2.
+func (s *Stats) snapshot(window time.Duration) Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// N Result.Start timestamps bound N-1 intervals, so the unbiased rate
-	// estimate is (N-1)/span. Using N/span reports r*N/(N-1) — 10% high at N=11
-	// and 100% high at N=2. A single Result bounds no interval and reports 0.
-	// Throughput is RPS x the mean bytes per Result, so it is the same estimator
-	// as RPS. Bytes/span would spend all N samples' bytes over N-1 intervals and
-	// report the N/(N-1) bias RPS exists to avoid — 2x at N=2.
-	rps, throughput := 0.0, 0.0
-	if span := s.last.Sub(s.first).Seconds(); s.count > 1 && span > 0 {
+	rps := 0.0
+	if window > 0 {
+		rps = float64(s.count) / window.Seconds()
+	} else if span := s.last.Sub(s.first).Seconds(); s.count > 1 && span > 0 {
 		rps = float64(s.count-1) / span
+	}
+
+	throughput := 0.0
+	if s.count > 0 {
 		throughput = rps * float64(s.bytes) / float64(s.count)
 	}
 
@@ -165,11 +189,14 @@ func (s *Stats) Snapshot() Snapshot {
 	}
 
 	return Snapshot{
-		Count:     s.count,
-		Errors:    s.errors,
-		RPS:       rps,
-		ErrorRate: errRate,
-		P50:       us(50), P95: us(95), P99: us(99),
+		Window:           window,
+		Count:            s.count,
+		Errors:           s.errors,
+		RPS:              rps,
+		ErrorRate:        errRate,
+		P50:              us(50),
+		P95:              us(95),
+		P99:              us(99),
 		Max:              s.maxLat,
 		MaxScheduleLag:   s.maxLag,
 		Clamped:          s.clamped,
@@ -178,7 +205,9 @@ func (s *Stats) Snapshot() Snapshot {
 		Bytes:            s.bytes,
 		Throughput:       throughput,
 		Codes:            maps.Clone(s.codes),
-		CorrectedP50:     corrected(50), CorrectedP95: corrected(95), CorrectedP99: corrected(99),
-		CorrectedCount: s.correctedCount,
+		CorrectedP50:     corrected(50),
+		CorrectedP95:     corrected(95),
+		CorrectedP99:     corrected(99),
+		CorrectedCount:   s.correctedCount,
 	}
 }

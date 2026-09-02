@@ -312,3 +312,50 @@ func TestSnapshotCorrectedNeverBelowRaw(t *testing.T) {
 		t.Fatalf("CorrectedP50=%v < P50=%v; correction must never reduce latency", snap.CorrectedP50, snap.P50)
 	}
 }
+
+func TestStatsSnapshotWindowUsesCountOverWindow(t *testing.T) {
+	s := NewStats()
+	base := time.Unix(0, 0)
+	for i := range 50 {
+		s.Record(Result{
+			Start:   base.Add(time.Duration(i) * time.Millisecond),
+			Latency: time.Millisecond,
+			Bytes:   100,
+		})
+	}
+
+	// Lifetime: 50 samples bound 49ms, so (50-1)/0.049 == 1000 rps, and a
+	// lifetime Snapshot carries no window.
+	life := s.Snapshot()
+	if life.Window != 0 {
+		t.Fatalf("lifetime Window=%v want 0", life.Window)
+	}
+	if life.RPS < 999 || life.RPS > 1001 {
+		t.Fatalf("lifetime RPS=%v want ~1000", life.RPS)
+	}
+
+	// Windowed: the caller knows these 50 Results cover 5s, so the rate is
+	// exactly 10 rps — no inference from timestamps, no N-1 correction.
+	win := s.snapshot(5 * time.Second)
+	if win.Window != 5*time.Second {
+		t.Fatalf("Window=%v want 5s", win.Window)
+	}
+	if win.RPS != 10 {
+		t.Fatalf("windowed RPS=%v want exactly 10", win.RPS)
+	}
+	if win.Throughput != 1000 {
+		t.Fatalf("windowed Throughput=%v want 1000 (10 rps x 100 bytes)", win.Throughput)
+	}
+}
+
+func TestStatsSnapshotWindowReportsZeroRateWhenEmpty(t *testing.T) {
+	// The property the lifetime estimator structurally cannot have: no data over
+	// a known duration is a rate of zero, not an undefined one.
+	got := NewStats().snapshot(5 * time.Second)
+	if got.RPS != 0 {
+		t.Fatalf("RPS=%v want 0", got.RPS)
+	}
+	if got.Window != 5*time.Second {
+		t.Fatalf("Window=%v want 5s", got.Window)
+	}
+}
