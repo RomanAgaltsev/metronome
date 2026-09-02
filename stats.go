@@ -244,6 +244,15 @@ func (s *Stats) merge(src *Stats) {
 	src.mu.Lock()
 	defer src.mu.Unlock()
 
+	// A src that has recorded nothing contributes nothing to any field below,
+	// but hdr.Merge would still walk its whole counts array — 17,408 int64s per
+	// histogram at the default range. A ring bucket is in exactly this state
+	// after every rotation that outran the traffic, so during a stall every
+	// live bucket is empty, which is when a control loop polls hardest.
+	if src.count == 0 {
+		return
+	}
+
 	// Merge reports values it had to drop for falling outside the destination's
 	// range. Every Stats in a RollingStats is constructed from one Rolling, so
 	// the ranges are identical and this is always zero.
