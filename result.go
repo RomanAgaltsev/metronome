@@ -49,6 +49,18 @@ func (r Result) Success() bool { return r.Err == nil }
 
 // Snapshot is an aggregated view of many Results over a window.
 type Snapshot struct {
+	// Window is the trailing duration these numbers cover. Zero means they are
+	// cumulative over the whole run — the lifetime view, and what Stats.Snapshot
+	// always returns. Non-zero comes from RollingStats.Window and qualifies every
+	// other field here: they describe only the last Window of the run.
+	//
+	// During a run's first window it is less than the configured window, and
+	// during steady state it sawtooths across [window-interval, window] because
+	// the newest bucket is always partial. The numbers are correct for the period
+	// they cover; this field is what that period is, so a reader never has to
+	// guess whether the window had filled.
+	Window time.Duration
+
 	Count         int64
 	Errors        int64
 	RPS           float64
@@ -117,8 +129,15 @@ type Snapshot struct {
 // It is a summary, not a serialisation — Codes, Bytes, Throughput and the
 // clamping counters are omitted. Reach for the fields directly when you need
 // them.
+//
+// A windowed Snapshot is prefixed "last <duration>: " so the two views are never
+// confused in a log.
 func (s Snapshot) String() string {
-	return fmt.Sprintf(
+	prefix := ""
+	if s.Window > 0 {
+		prefix = "last " + s.Window.Round(time.Millisecond).String() + ": "
+	}
+	return prefix + fmt.Sprintf(
 		"%d req, %.1f rps, %.2f%% err (%d saturated), p50/p95/p99 %v/%v/%v, "+
 			"corrected p95/p99 %v/%v, behind schedule %v",
 		s.Count, s.RPS, s.ErrorRate*100, s.Saturated,

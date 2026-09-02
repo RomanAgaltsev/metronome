@@ -105,3 +105,97 @@ func BenchmarkStatsRecord(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkRollingStatsRecord measures what a caller pays for the trailing
+// window: one extra mutex around the pair Stats already takes, plus a rotation
+// check on every Record. Compare it against BenchmarkStatsRecord.
+func BenchmarkRollingStatsRecord(b *testing.B) {
+	rs := NewRollingStats(Rolling{})
+	base := time.Unix(0, 0)
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			i++
+			rs.Record(Result{
+				Scheduled: base,
+				Start:     base.Add(time.Duration(i) * time.Microsecond),
+				Latency:   time.Duration(i%1000) * time.Microsecond,
+				Code:      "200",
+				Bytes:     512,
+			})
+		}
+	})
+}
+
+// BenchmarkRollingStatsWindow measures the merge a control loop pays per poll.
+// The cost is proportional to the live bucket count and to the histogram's
+// counts array, not to the number of Results in them — so this fills the whole
+// default ring, which is the steady-state worst case.
+//
+// It runs on a ManualClock rather than the wall clock deliberately: with real
+// time and one-second buckets, the live count would climb from 1 to 10 partway
+// through the run and then the ring would drain, so the reported figure would
+// depend on -benchtime rather than on the code.
+func BenchmarkRollingStatsWindow(b *testing.B) {
+	clk := NewManualClock(time.Unix(0, 0))
+	rs := NewRollingStats(Rolling{Clock: clk})
+	base := time.Unix(0, 0)
+
+	// 10,000 Results into each of the ten buckets, so every one is live.
+	for bucket := range DefaultBuckets {
+		for i := range 10000 {
+			rs.Record(Result{
+				Scheduled: base,
+				Start:     base.Add(time.Duration(i) * time.Microsecond),
+				Latency:   time.Duration(i%1000) * time.Microsecond,
+				Code:      "200",
+				Bytes:     512,
+			})
+		}
+		if bucket < DefaultBuckets-1 {
+			clk.Advance(DefaultWindow / DefaultBuckets)
+		}
+	}
+	if rs.live != DefaultBuckets {
+		b.Fatalf("live=%d want %d; the benchmark is not measuring a full ring", rs.live, DefaultBuckets)
+	}
+
+	for b.Loop() {
+		_ = rs.Window()
+	}
+}
+
+// BenchmarkRollingStatsWindowStalled measures the same poll during a stall: the
+// ring is still fully live, but every bucket has been rotated through and reset
+// without being written to again. That is the state a control loop polls in when
+// the target has stopped answering, which is the case this type exists for, and
+// it is the one Stats.merge's empty-source check is there to make cheap.
+func BenchmarkRollingStatsWindowStalled(b *testing.B) {
+	clk := NewManualClock(time.Unix(0, 0))
+	rs := NewRollingStats(Rolling{Clock: clk})
+	base := time.Unix(0, 0)
+
+	for i := range 10000 {
+		rs.Record(Result{
+			Scheduled: base,
+			Start:     base.Add(time.Duration(i) * time.Microsecond),
+			Latency:   time.Duration(i%1000) * time.Microsecond,
+			Code:      "200",
+			Bytes:     512,
+		})
+	}
+	// One bucket at a time, so live climbs to the whole ring instead of
+	// collapsing to 1 the way a single gap wider than the window would. Ten
+	// rotations also retires the bucket holding the traffic.
+	for range DefaultBuckets {
+		clk.Advance(DefaultWindow / DefaultBuckets)
+		_ = rs.Window()
+	}
+	if snap := rs.Window(); rs.live != DefaultBuckets || snap.Count != 0 {
+		b.Fatalf("live=%d count=%d; want a fully live, wholly empty ring", rs.live, snap.Count)
+	}
+
+	for b.Loop() {
+		_ = rs.Window()
+	}
+}

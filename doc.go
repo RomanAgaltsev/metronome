@@ -36,6 +36,14 @@
 // due). Read them as a pair: a large gap means the generator queued, and the raw
 // numbers understate what a real client would have suffered by roughly that much.
 //
+// For a run being watched while it happens, use RollingStats instead of Stats.
+// It records into both a lifetime aggregate and a ring of trailing buckets, so
+// Snapshot keeps its cumulative meaning while Window reports only the recent
+// past. The distinction matters most for Snapshot.MaxScheduleLag, which is a
+// lifetime maximum: one early stall pins it for the rest of the run, and a
+// target that stops answering never moves any cumulative number at all, because
+// there are no new Results to move it.
+//
 // # Diagnosing a run that fell short
 //
 // [Snapshot.Saturated] counts units the target had no free worker for;
