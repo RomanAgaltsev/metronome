@@ -4,6 +4,7 @@ import (
 	"errors"
 	"maps"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	hdr "github.com/HdrHistogram/hdrhistogram-go"
@@ -13,6 +14,11 @@ const (
 	bytesPerCount      = 8 // one int64 per histogram bucket count
 	histogramsPerStats = 2 // raw and corrected
 )
+
+// statsID orders lock acquisition in Merge. Construction order is a total
+// order over every Stats in the process, which is all Merge needs and is
+// cheaper to reason about than comparing pointer addresses through unsafe.
+var statsID atomic.Uint64
 
 // Stats aggregates Results into percentile Snapshots. Safe for concurrent Record.
 type Stats struct {
@@ -35,6 +41,8 @@ type Stats struct {
 	// countsLen is the length of each histogram's counts array, derived at
 	// construction. Immutable, so Bytes needs no lock.
 	countsLen int64
+
+	id uint64 // construction order; see statsID
 }
 
 // NewStats returns Stats recording latencies from 1µs to 60s with 3 significant
@@ -65,6 +73,7 @@ func NewStatsRange(lo, hi time.Duration, sigfigs int) *Stats {
 		corrected: hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs),
 		codes:     make(map[string]int64),
 		countsLen: histogramCounts(lo, hi, sigfigs),
+		id:        statsID.Add(1),
 	}
 }
 
@@ -236,28 +245,21 @@ func (s *Stats) reset() {
 // merge folds src into s.
 //
 // The caller must hold exclusive use of s; src is locked for the read. That
-// asymmetry is deliberate and sufficient here: RollingStats only ever merges
-// buckets into its own private scratch Stats, so no two Stats are ever merged
-// into each other and there is no lock-ordering cycle to reason about.
-//
-// Both must have been built from the same histogram range, which every Stats
-// inside one RollingStats is.
+// asymmetry is deliberate and sufficient for RollingStats, which only ever
+// merges buckets into its own private scratch Stats. Merge is the exported
+// form and takes both locks.
 func (s *Stats) merge(src *Stats) {
 	src.mu.Lock()
 	defer src.mu.Unlock()
+	s.mergeLocked(src)
+}
 
-	// A src that has recorded nothing contributes nothing to any field below,
-	// but hdr.Merge would still walk its whole counts array — 17,408 int64s per
-	// histogram at the default range. A ring bucket is in exactly this state
-	// after every rotation that outran the traffic, so during a stall every
-	// live bucket is empty, which is when a control loop polls hardest.
-	if src.count == 0 {
-		return
-	}
-
+// mergeLocked folds src into s. The caller holds exclusive use of s and holds
+// src.mu.
+func (s *Stats) mergeLocked(src *Stats) {
 	// Merge reports values it had to drop for falling outside the destination's
-	// range. Every Stats in a RollingStats is constructed from one Rolling, so
-	// the ranges are identical and this is always zero.
+	// range. Both callers guarantee identical ranges — RollingStats by
+	// construction, Merge by an explicit check — so this is always zero.
 	_ = s.hist.Merge(src.hist)
 	_ = s.corrected.Merge(src.corrected)
 
@@ -291,4 +293,50 @@ func (s *Stats) merge(src *Stats) {
 // It needs no lock: the length is fixed at construction.
 func (s *Stats) Bytes() int64 {
 	return s.countsLen * bytesPerCount * histogramsPerStats
+}
+
+// sameRange reports whether s and src record over the same range with the same
+// significant figures. It reads only values fixed at construction, so it needs
+// no lock.
+func (s *Stats) sameRange(src *Stats) bool {
+	return s.hist.LowestTrackableValue() == src.hist.LowestTrackableValue() &&
+		s.hist.HighestTrackableValue() == src.hist.HighestTrackableValue() &&
+		s.hist.SignificantFigures() == src.hist.SignificantFigures()
+}
+
+// Merge folds src into s, so that s reports what it would have reported had it
+// recorded every Result src did. Percentiles cannot be combined after the fact,
+// so this merges the underlying histograms rather than the Snapshots.
+//
+// Use it to roll a LabeledStats breakdown up into an ad-hoc subtotal, to
+// combine per-worker aggregates recorded in parallel, or to combine separate
+// runs.
+//
+// Both Stats must have been built with the same range and significant figures;
+// Merge panics otherwise, and panics if src is s. Range equality is a property
+// of construction, so a mismatch fires on the first call rather than later and
+// only for some values — it is a programmer error, and it is reported as one.
+//
+// It is safe to call concurrently with Record on either Stats, and safe to call
+// in both directions from different goroutines.
+func (s *Stats) Merge(src *Stats) {
+	if s == src {
+		panic("metronome: Stats.Merge cannot merge a Stats into itself")
+	}
+	if !s.sameRange(src) {
+		panic("metronome: Stats.Merge requires both Stats to have the same range and sigfigs")
+	}
+
+	// Lock in construction order so that a.Merge(b) racing b.Merge(a) cannot
+	// deadlock on taking the two mutexes in opposite orders.
+	first, second := s, src
+	if src.id < s.id {
+		first, second = src, s
+	}
+	first.mu.Lock()
+	defer first.mu.Unlock()
+	second.mu.Lock()
+	defer second.mu.Unlock()
+
+	s.mergeLocked(src)
 }
