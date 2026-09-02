@@ -226,3 +226,65 @@ func TestLabeledStatsRecordIsSafeUnderConcurrentSeriesCreation(t *testing.T) {
 		t.Fatalf("Len()=%d want 5", got)
 	}
 }
+
+func TestLabeledStatsSeriesReturnsACopyOfTheMap(t *testing.T) {
+	ls := newLabeled(t, Labeled[*Stats]{})
+	base := time.Unix(0, 0)
+	ls.Record(labelled("endpoint", "a", time.Millisecond, base))
+
+	m := ls.Series()
+	delete(m, "a")
+	m["injected"] = NewStats()
+
+	if got := ls.Len(); got != 1 {
+		t.Fatalf("Len()=%d want 1 — mutating the returned map changed the LabeledStats", got)
+	}
+	if _, ok := ls.Series()["a"]; !ok {
+		t.Fatal(`series "a" disappeared after the caller mutated their copy`)
+	}
+}
+
+func TestLabeledStatsTotalIsTheSameRecorderSnapshotReports(t *testing.T) {
+	ls := newLabeled(t, Labeled[*Stats]{})
+	base := time.Unix(0, 0)
+	for i := range 20 {
+		ls.Record(labelled("endpoint", "a", time.Millisecond, base.Add(time.Duration(i)*time.Millisecond)))
+	}
+
+	if got, want := ls.Total().Snapshot(), ls.Snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Total().Snapshot()=%+v want Snapshot()=%+v", got, want)
+	}
+}
+
+func TestLabeledStatsOverRollingChildrenGivesTypedPerSeriesWindows(t *testing.T) {
+	// The whole reason the type is generic: no assertion here.
+	clk := NewManualClock(time.Unix(0, 0))
+	ls := NewLabeledStats(Labeled[*RollingStats]{
+		Key: "endpoint",
+		New: func() *RollingStats {
+			return NewRollingStats(Rolling{Window: 10 * time.Second, Buckets: 10, Clock: clk})
+		},
+	})
+
+	base := clk.Now()
+	for i := range 10 {
+		ls.Record(labelled("endpoint", "a", 5*time.Millisecond, base.Add(time.Duration(i)*time.Millisecond)))
+	}
+
+	if got := ls.Series()["a"].Window().Count; got != 10 {
+		t.Fatalf("per-series Window().Count=%d want 10", got)
+	}
+
+	// Past the whole window with no traffic, the series drains but the lifetime
+	// view does not.
+	clk.Advance(30 * time.Second)
+	if got := ls.Series()["a"].Window().Count; got != 0 {
+		t.Fatalf("per-series Window().Count=%d want 0 after a full stall", got)
+	}
+	if got := ls.Series()["a"].Snapshot().Count; got != 10 {
+		t.Fatalf("per-series lifetime Count=%d want 10", got)
+	}
+	if got := ls.Total().Window().Count; got != 0 {
+		t.Fatalf("total Window().Count=%d want 0 after a full stall", got)
+	}
+}

@@ -1,6 +1,7 @@
 package metronome
 
 import (
+	"maps"
 	"sync"
 )
 
@@ -234,4 +235,27 @@ func (ls *LabeledStats[R]) Record(r Result) {
 	// pointer is stable once created, so releasing before using it is safe.
 	ls.total.Record(r)
 	c.Record(r)
+}
+
+// Snapshot returns the total: the aggregate over every Result recorded,
+// regardless of label. It is exactly what a plain Stats fed the same stream
+// would have produced.
+func (ls *LabeledStats[R]) Snapshot() Snapshot { return ls.total.Snapshot() }
+
+// Total returns the recorder behind Snapshot, typed. Use it to reach a child
+// method the Recorder seam does not carry — most usefully
+// LabeledStats[*RollingStats].Total().Window().
+func (ls *LabeledStats[R]) Total() R { return ls.total }
+
+// Series returns the per-label recorders, including the overflow and unlabeled
+// series once they exist.
+//
+// The map is a copy the caller owns; the recorders in it are live and shared
+// with this LabeledStats. Read them — Snapshot, and Window when the child type
+// has one — but do not Record into them, which would count a Result in a series
+// without counting it in the total.
+func (ls *LabeledStats[R]) Series() map[string]R {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+	return maps.Clone(ls.series)
 }
