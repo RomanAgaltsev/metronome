@@ -85,6 +85,8 @@ abandoning a live channel leaks the workers.
 | `Burst` | rate-limiter burst size; 0 means 1 (smoothest schedule) |
 | `ErrSaturated` | open-loop marker: no worker was free at the scheduled time |
 | `Stats` / `Snapshot` | HDR-histogram percentiles, error rate, achieved rps, bytes/codes |
+| `RollingStats` / `Rolling` | the same aggregate over a trailing window, for watching a live run |
+| `Snapshot.Window` | the duration a `Snapshot` covers; zero means cumulative |
 | `Snapshot.Saturated` | how much of the error rate was the target refusing work |
 | `Snapshot.MaxScheduleLag` | how far the generator itself fell behind its own schedule |
 | `Snapshot.String()` | the numbers a run is judged on, in the order to read them |
@@ -173,6 +175,93 @@ The third row is why `MaxScheduleLag` exists: `ErrSaturated` can only report a t
 that was too slow, never a dispatcher that was. At 5,000 rps open loop reports
 `Saturated=0, MaxScheduleLag=330ms` — nothing was wrong with the target.
 
+### Rolling window
+
+Every number a `Snapshot` carries is cumulative over the whole run. That is right
+for the report you print at the end and wrong for anything watching a run while it
+happens: `MaxScheduleLag` is a running maximum, so one stall in the first second
+pins it for the rest of the run, and a target that stops answering **never moves
+any cumulative number at all** — there are no new `Result`s to move them, so `RPS`
+goes on reporting the rate the run used to achieve.
+
+`RollingStats` records into both views at once. Use `Snapshot()` for the end-of-run
+report — it means exactly what `Stats.Snapshot()` means — and `Window()` for a
+control loop, a progress line, or anything else reading a run live.
+
+```go
+rs := metronome.NewRollingStats(metronome.Rolling{Window: 10 * time.Second, Buckets: 10})
+for r := range d.Run(ctx) {
+	rs.Record(r)
+}
+
+// live, from a control loop or a progress ticker:
+fmt.Println(rs.Window())   // last 9.7s: 4821 req, 497.0 rps, 0.00% err (0 saturated), ...
+// at the end:
+fmt.Println(rs.Snapshot()) // 50210 req, 499.1 rps, 0.02% err (0 saturated), ...
+```
+
+The zero `Rolling{}` is valid: a 10-second window in 10 buckets on the wall clock
+over the `NewStats` histogram range. Pass a `Clock` to make window tests exact,
+the same `ManualClock` the `Driver` takes.
+
+`Window()` divides by the time the ring **actually** covers, not by the nominal
+window, and reports that duration in `Snapshot.Window` — non-zero on a windowed
+`Snapshot`, zero on a lifetime one, and `String()` prefixes `last 9.7s: ` so the
+two are never confused in a log. So three seconds into a ten-second window a
+healthy 100 rps reads as `100.0` over `Window: 3s` rather than `30.0` over a window
+two-thirds empty, and at steady state the figure sawtooths across
+`[window − interval, window]` because the newest bucket is always partial. The
+numbers are correct for the period they cover; that field is what the period is.
+
+Rotation happens on read as well as write, which is the whole point: with no
+`Record` traffic to drive it, only a read can notice that time has passed, so a
+full stall drains the window to zero instead of freezing it at the last healthy
+figures.
+
+Measured on the machine described under [Measured accuracy](#measured-accuracy):
+
+| Operation | Cost |
+|---|---|
+| `Stats.Record` | 147 ns/op |
+| `RollingStats.Record` | 223 ns/op — about **+75 ns**, or 1.5×, for the second view |
+| `Window()`, ring full of traffic | 730 µs/op, 2 allocs |
+| `Window()`, ring live but empty (a stall) | 2.7 µs/op, 2 allocs |
+
+`Record` is the hot path and pays a flat 75 ns. `Window()` is not: it merges the
+live buckets' histograms, so it costs roughly `live × countsLen`, independent of
+how many `Result`s are in them — 0.7 ms at the default range and a full ring. Poll
+it at 1–10 Hz from a control loop, not per request. Empty buckets are skipped, so
+the stall case a control loop polls hardest in is the cheap one. Reproduce with:
+
+```bash
+go test -run '^$' -bench 'BenchmarkStatsRecord|BenchmarkRollingStats' -benchtime=2s -benchmem ./...
+```
+
+#### Memory
+
+A `RollingStats` allocates `Buckets+2` histogram pairs — the ring, the lifetime
+aggregate and a scratch merge target — so `Buckets` multiplies memory as well as
+resolution. Price any configuration before building it with `Rolling.Bytes()`.
+
+| `Rolling` | Footprint |
+|---|---|
+| `Rolling{}` (10 buckets, 1µs–60s, 3 sig figs) | 3.2 MiB |
+| `Rolling{Buckets: 100}` | 27 MiB |
+| `Rolling{Buckets: 1000}` | 266 MiB |
+| `Rolling{Buckets: 1000, Lo: time.Millisecond, Hi: time.Second, Sigfigs: 1}` | 2.0 MiB |
+
+The last two rows are the rule: **narrow the histogram range when you want a large
+ring.** `Bytes()` panics on exactly the configurations `NewRollingStats` panics on,
+so pricing an unbuildable config reports the problem rather than a number for it.
+
+Underneath the arithmetic is a representation mismatch, not a tuning problem. A
+fine-grained ring — 1,000 buckets over 10s at 1,000 rps — puts about ten `Result`s
+in each 136 KiB dense array, roughly **13 KiB per recorded sample**, and HDR is
+array-backed. Sparse bucket storage is the fix and it is a known, costed trade
+rather than an oversight: it is demand-gated on the roadmap, so open an issue if
+you want a fine-grained window and it becomes a decision rather than a
+rediscovery.
+
 ### Measured accuracy
 
 Measured on an AMD Ryzen 5 3600 (6 cores / 12 threads), Windows 11, Go 1.26.6,
@@ -199,7 +288,8 @@ Per-request kernel overhead (no-op `Runner`, unlimited rate, `Workers = GOMAXPRO
 **600 ns/op** closed-loop and **895 ns/op** open-loop, i.e. a plumbing ceiling near
 **1.7M rps** and **1.1M rps** respectively. Note the gap between that ceiling and the
 5,000 rps adherence figure above: metronome's limit at realistic rates is sleep
-granularity, not CPU. `Stats.Record` costs **211 ns/op** under full contention.
+granularity, not CPU. `Stats.Record` costs **147 ns/op** under full contention
+(`RollingStats.Record` 223 — see [Rolling window](#rolling-window)).
 Reproduce with:
 
 ```bash
@@ -208,7 +298,7 @@ go test -run '^$' -bench 'BenchmarkDriverOverhead|BenchmarkStatsRecord' ./...
 
 ## Status
 
-v0.3 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
+v0.5 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
 versions may carry small breaking changes**, always with a migration note in the
 CHANGELOG. Pin an exact version.
 
