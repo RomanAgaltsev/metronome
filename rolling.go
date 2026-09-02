@@ -235,6 +235,58 @@ func (rs *RollingStats) Snapshot() Snapshot {
 	return rs.life.snapshot(0)
 }
 
+// covered is how much wall time the live ring actually spans: the completed
+// buckets behind the current one, plus however far into the current one the
+// clock has moved. The caller holds rs.mu.
+//
+// It is capped at the age of the run, so a caller reading during the first
+// window gets the truth rather than a window padded with time that never
+// happened, and floored at one interval, because RPS divides by it and a
+// RollingStats read in the same instant it was built has covered nothing.
+func (rs *RollingStats) covered(now time.Time) time.Duration {
+	d := now.Sub(rs.curStart) + time.Duration(rs.live-1)*rs.interval
+	if age := now.Sub(rs.origin); d > age {
+		d = age
+	}
+	if d <= 0 {
+		d = rs.interval
+	}
+	return d
+}
+
+// Window returns the aggregate over the trailing Rolling.Window — or over
+// however much of it the run has covered so far, which Snapshot.Window reports.
+//
+// It rotates the ring before reading, so a run that has stopped producing
+// Results drains to zero instead of freezing at its last healthy numbers. That
+// is the difference from Snapshot, and the reason to call this one from a
+// control loop: Snapshot.MaxScheduleLag is a lifetime maximum that cannot tell
+// "the generator is behind now" from "the generator was behind once".
+//
+// Safe to call concurrently with Record. The returned Snapshot is a value and
+// its Codes map is a copy, so it is the caller's to keep.
+func (rs *RollingStats) Window() Snapshot {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+
+	now := rs.clock.Now()
+	rs.rotate(now)
+
+	rs.scratch.reset()
+	for i := range rs.live {
+		// Walk back from the current bucket. Only live buckets are merged: the
+		// rest are empty, and skipping them keeps the cost proportional to the
+		// data rather than to Buckets.
+		idx := rs.idx - i
+		if idx < 0 {
+			idx += len(rs.ring)
+		}
+		rs.scratch.merge(rs.ring[idx])
+	}
+
+	return rs.scratch.snapshot(rs.covered(now))
+}
+
 // histogramCounts is the length of the counts array hdr.New allocates for a
 // [lo, hi] range at sigfigs significant digits — the same derivation
 // NewStatsRange triggers, reproduced so a configuration can be priced without

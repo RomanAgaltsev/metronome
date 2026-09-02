@@ -1,6 +1,8 @@
 package metronome
 
 import (
+	"maps"
+	"math"
 	"testing"
 	"time"
 )
@@ -208,5 +210,140 @@ func TestRollingIgnoresAClockThatGoesBackwards(t *testing.T) {
 	}
 	if got := rs.ring[rs.idx].Snapshot().Count; got != 1 {
 		t.Fatalf("current bucket Count=%d want 1", got)
+	}
+}
+
+func TestRollingWindowDuringWarmupDividesByWhatItCovers(t *testing.T) {
+	clk := NewManualClock(time.Unix(0, 0))
+	rs := NewRollingStats(Rolling{Window: 10 * time.Second, Buckets: 10, Clock: clk})
+
+	// Three seconds of a ten-second window, at a steady 100 rps.
+	for range 3 {
+		for range 100 {
+			rs.Record(Result{Start: clk.Now(), Latency: time.Millisecond})
+		}
+		clk.Advance(time.Second)
+	}
+
+	snap := rs.Window()
+	if snap.Window != 3*time.Second {
+		t.Fatalf("Window=%v want 3s", snap.Window)
+	}
+	if snap.Count != 300 {
+		t.Fatalf("Count=%d want 300", snap.Count)
+	}
+	if snap.RPS != 100 {
+		t.Fatalf("RPS=%v want exactly 100; dividing by the nominal 10s would give 30", snap.RPS)
+	}
+}
+
+func TestRollingWindowRetiresOldBuckets(t *testing.T) {
+	clk := NewManualClock(time.Unix(0, 0))
+	rs := NewRollingStats(Rolling{Window: 5 * time.Second, Buckets: 5, Clock: clk})
+
+	// Twenty seconds at 10 rps.
+	for range 20 {
+		for range 10 {
+			rs.Record(Result{Start: clk.Now(), Latency: time.Millisecond})
+		}
+		clk.Advance(time.Second)
+	}
+
+	// The clock sits exactly on a bucket boundary, so the newest bucket is empty
+	// and the window covers the four completed ones behind it. That is the
+	// [window-interval, window] sawtooth every bucketed window has, reported
+	// rather than rounded up.
+	snap := rs.Window()
+	if snap.Window != 4*time.Second {
+		t.Fatalf("Window=%v want 4s on a bucket boundary", snap.Window)
+	}
+	if snap.Count != 40 {
+		t.Fatalf("Count=%d want 40", snap.Count)
+	}
+	if snap.RPS != 10 {
+		t.Fatalf("RPS=%v want 10", snap.RPS)
+	}
+	if got := rs.Snapshot().Count; got != 200 {
+		t.Fatalf("lifetime Count=%d want 200", got)
+	}
+
+	// Half a bucket later the current bucket is partial and counted.
+	clk.Advance(500 * time.Millisecond)
+	rs.Record(Result{Start: clk.Now(), Latency: time.Millisecond})
+
+	snap = rs.Window()
+	if snap.Window != 4500*time.Millisecond {
+		t.Fatalf("Window=%v want 4.5s mid-bucket", snap.Window)
+	}
+	if snap.Count != 41 {
+		t.Fatalf("Count=%d want 41; the partial current bucket must be included", snap.Count)
+	}
+}
+
+func TestRollingWindowWithOneBucketIsATumblingWindow(t *testing.T) {
+	clk := NewManualClock(time.Unix(0, 0))
+	rs := NewRollingStats(Rolling{Window: time.Second, Buckets: 1, Clock: clk})
+
+	for range 10 {
+		rs.Record(Result{Start: clk.Now(), Latency: time.Millisecond})
+	}
+	if got := rs.Window().Count; got != 10 {
+		t.Fatalf("Count=%d want 10", got)
+	}
+
+	clk.Advance(time.Second)
+	snap := rs.Window()
+	if snap.Count != 0 {
+		t.Fatalf("Count=%d want 0 once the single bucket rotated", snap.Count)
+	}
+	if snap.Window <= 0 {
+		t.Fatalf("Window=%v want a positive duration; RPS divides by it", snap.Window)
+	}
+	if snap.RPS != 0 {
+		t.Fatalf("RPS=%v want 0", snap.RPS)
+	}
+}
+
+func TestRollingWindowImmediatelyAfterConstructionIsFinite(t *testing.T) {
+	// No time has elapsed, so coverage would be zero and RPS a division by it.
+	clk := NewManualClock(time.Unix(0, 0))
+	rs := NewRollingStats(Rolling{Clock: clk})
+	rs.Record(Result{Start: clk.Now(), Latency: time.Millisecond})
+
+	snap := rs.Window()
+	if math.IsInf(snap.RPS, 0) || math.IsNaN(snap.RPS) {
+		t.Fatalf("RPS=%v want a finite number", snap.RPS)
+	}
+	if snap.Window <= 0 {
+		t.Fatalf("Window=%v want positive", snap.Window)
+	}
+}
+
+func TestRollingWindowMatchesAStatsFedTheSameLiveResults(t *testing.T) {
+	// The merge must not lose or double-count anything: a window wide enough to
+	// hold every Result must equal one Stats fed all of them.
+	clk := NewManualClock(time.Unix(0, 0))
+	rs := NewRollingStats(Rolling{Window: time.Hour, Buckets: 10, Clock: clk})
+	whole := NewStats()
+
+	for _, r := range buildMergeResults() {
+		rs.Record(r)
+		whole.Record(r)
+		clk.Advance(time.Second)
+	}
+
+	win, want := rs.Window(), whole.Snapshot()
+	if win.Count != want.Count || win.Errors != want.Errors || win.Bytes != want.Bytes {
+		t.Fatalf("counts differ: window %+v want %+v", win, want)
+	}
+	if win.P50 != want.P50 || win.P95 != want.P95 || win.P99 != want.P99 {
+		t.Fatalf("percentiles differ: window %v/%v/%v want %v/%v/%v",
+			win.P50, win.P95, win.P99, want.P50, want.P95, want.P99)
+	}
+	if win.MaxScheduleLag != want.MaxScheduleLag {
+		t.Fatalf("MaxScheduleLag=%v want %v", win.MaxScheduleLag, want.MaxScheduleLag)
+	}
+	if !maps.Equal(win.Codes, want.Codes) {
+		t.Fatalf("Codes=%v want %v", win.Codes, want.Codes)
 	}
 }
