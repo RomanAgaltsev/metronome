@@ -105,3 +105,44 @@ func BenchmarkStatsRecord(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkRollingStatsRecord measures what a caller pays for the trailing
+// window: one extra mutex around the pair Stats already takes, plus a rotation
+// check on every Record. Compare it against BenchmarkStatsRecord.
+func BenchmarkRollingStatsRecord(b *testing.B) {
+	rs := NewRollingStats(Rolling{})
+	base := time.Unix(0, 0)
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			i++
+			rs.Record(Result{
+				Scheduled: base,
+				Start:     base.Add(time.Duration(i) * time.Microsecond),
+				Latency:   time.Duration(i%1000) * time.Microsecond,
+				Code:      "200",
+				Bytes:     512,
+			})
+		}
+	})
+}
+
+// BenchmarkRollingStatsWindow measures the merge a control loop pays per poll.
+// It is proportional to the live bucket count, not to the Results in them.
+func BenchmarkRollingStatsWindow(b *testing.B) {
+	rs := NewRollingStats(Rolling{})
+	base := time.Unix(0, 0)
+	for i := range 100000 {
+		rs.Record(Result{
+			Scheduled: base,
+			Start:     base.Add(time.Duration(i) * time.Microsecond),
+			Latency:   time.Duration(i%1000) * time.Microsecond,
+			Code:      "200",
+			Bytes:     512,
+		})
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		_ = rs.Window()
+	}
+}
