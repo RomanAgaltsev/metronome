@@ -7,6 +7,62 @@
 
 * rolling-window Stats ([#20](https://github.com/RomanAgaltsev/metronome/issues/20)) ([8cc0e0b](https://github.com/RomanAgaltsev/metronome/commit/8cc0e0bce32ae89626219556e369b64df68b6b52))
 
+#### `RollingStats` — the same aggregate over a trailing window
+
+Every `Snapshot` number is cumulative over the whole run. That is right for the report
+you print at the end and wrong for anything watching a run while it happens: one stall
+in the first second pins `MaxScheduleLag` for the rest of the run, and a target that
+stops answering never moves any cumulative number at all, because there are no new
+`Result`s to move them.
+
+`RollingStats` records into both views at once — a lifetime `*Stats` and a ring of
+bucket `*Stats`. `Snapshot()` keeps exactly the meaning `Stats.Snapshot()` has;
+`Window()` returns the same aggregate over the trailing window, dividing by the
+duration actually covered rather than the nominal one. Rotation runs on **read as well
+as write**, so a stalled run drains the window to zero instead of freezing it at its
+last healthy numbers.
+
+Configured by `Rolling` (`Window`, `Buckets`, `Clock`, `Lo`, `Hi`, `Sigfigs`); the zero
+value is valid and gives a 10s window in 10 buckets on the wall clock. `Stats` gains no
+public surface and behaves identically.
+
+`Rolling.Bytes()` prices a configuration before it is built, and panics on exactly the
+configurations `NewRollingStats` panics on. Use it: `Buckets` reads as a resolution knob
+and is a memory multiplier — a `RollingStats` allocates `Buckets+2` histogram pairs, so
+`Rolling{Buckets: 1000}` is 266 MiB at the default range and 2.0 MiB with the histogram
+range narrowed. The README carries the table.
+
+#### `Snapshot` gains a `Window` field
+
+**Additive, and called out rather than left to be discovered**, per the pre-v1 policy on
+struct changes. `Snapshot.Window` is the trailing duration the numbers cover: zero on
+the cumulative lifetime view — which is what `Stats.Snapshot()` always returns, so it
+also distinguishes the two kinds — and positive on one from `RollingStats.Window()`,
+where it is additionally the `RPS` denominator. `Snapshot.String()` prefixes
+`last 9.7s: ` when it is set, so the two views are never confused in a log.
+
+It is the **first** field of the struct. `Snapshot` is a return value rather than an
+input, so no realistic consumer breaks — but an unkeyed composite literal of it would
+now fail to compile.
+
+#### What the second view costs
+
+Measured on an AMD Ryzen 5 3600, `-benchtime=2s -count=5`, `b.RunParallel` at
+GOMAXPROCS=12 — the cost of choosing `RollingStats` over `Stats`, on the artifact rather
+than in a design note:
+
+| | ns/op | allocs |
+|---|---|---|
+| `Stats.Record` | 147 | 0 |
+| `RollingStats.Record` | 223 | 0 |
+| **delta** | **+76 ns, 1.5×** | 0 |
+
+`Window()` is a different shape and worth knowing before you wire it to a ticker: it
+merges the live buckets' histograms, so it costs roughly `live × countsLen` and is
+**independent of how many `Result`s are in them** — 730 µs/op over a full default ring,
+2.7 µs/op over a stalled one, 256 B and 2 allocations either way. Poll it at 1–10 Hz
+from a control loop, not per request.
+
 ## [0.4.0](https://github.com/RomanAgaltsev/metronome/compare/v0.3.2...v0.4.0) (2026-08-16)
 
 
