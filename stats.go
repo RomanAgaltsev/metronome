@@ -52,11 +52,13 @@ func NewStatsRange(lo, hi time.Duration, sigfigs int) *Stats {
 		panic("metronome: NewStatsRange sigfigs must be in [1, 5]")
 	}
 	return &Stats{
-		hist: hdr.New(int64(lo/time.Microsecond),
+		hist: hdr.New(
+			int64(lo/time.Microsecond),
 			int64(hi/time.Microsecond),
 			sigfigs,
 		),
-		corrected: hdr.New(int64(lo/time.Microsecond),
+		corrected: hdr.New(
+			int64(lo/time.Microsecond),
 			int64(hi/time.Microsecond),
 			sigfigs,
 		),
