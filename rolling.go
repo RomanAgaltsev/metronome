@@ -87,9 +87,15 @@ func (cfg Rolling) windowAndBuckets() (time.Duration, int) {
 	return window, buckets
 }
 
-// histRange resolves the histogram parameters. NewStatsRange panics on lo <= 0,
-// hi <= lo and sigfigs outside [1, 5], so only the zero-means-default mapping
-// and the negative-sigfigs case belong here.
+// histRange resolves the histogram parameters, panicking on input no defaulting
+// can rescue.
+//
+// It repeats the three rules NewStatsRange enforces rather than leaving them to
+// it. NewRollingStats reaches NewStatsRange and would panic either way, but
+// Bytes never constructs anything, so without these it would price a
+// configuration that cannot be built — Rolling{Sigfigs: 6} would report 1.3 GiB
+// for a config whose constructor panics. The panics name the Rolling field the
+// caller actually typed.
 func (cfg Rolling) histRange() (lo, hi time.Duration, sigfigs int) {
 	lo, hi, sigfigs = cfg.Lo, cfg.Hi, cfg.Sigfigs
 	if lo == 0 {
@@ -98,11 +104,18 @@ func (cfg Rolling) histRange() (lo, hi time.Duration, sigfigs int) {
 	if hi == 0 {
 		hi = time.Minute
 	}
-	if sigfigs < 0 {
-		panic("metronome: Rolling.Sigfigs must not be negative")
-	}
 	if sigfigs == 0 {
 		sigfigs = 3
+	}
+
+	if lo <= 0 {
+		panic("metronome: Rolling.Lo must be > 0")
+	}
+	if hi <= lo {
+		panic("metronome: Rolling.Hi must be > Rolling.Lo")
+	}
+	if sigfigs < 1 || sigfigs > 5 {
+		panic("metronome: Rolling.Sigfigs must be in [1, 5]")
 	}
 	return lo, hi, sigfigs
 }
@@ -145,10 +158,10 @@ type RollingStats struct {
 	interval time.Duration // one bucket's span: window / buckets
 	life     *Stats        // the cumulative aggregate
 	ring     []*Stats      // the trailing buckets
-	scratch  *Stats        // reusable merge target, so Window allocates nothing
+	scratch  *Stats        // reusable merge target, so Window allocates no histograms
 	idx      int           // ring index of the bucket now being filled
 	live     int           // how many ring buckets hold data, for coverage
-	origin   time.Time     // clock.Now() at construction
+	origin   time.Time     // clock.Now() at construction: the bucket grid's anchor
 	curStart time.Time     // when the current bucket opened
 }
 
@@ -216,6 +229,12 @@ func (rs *RollingStats) rotate(now time.Time) {
 
 // Record adds one Result to both the lifetime aggregate and the current bucket.
 // It is safe to call concurrently.
+//
+// Which bucket a Result lands in is decided by the clock at the moment Record is
+// called, not by Result.Start. A caller that buffers Results and drains them in
+// batches therefore attributes a batch to the window it drained in rather than
+// the window the work happened in. Record as you receive, which is what ranging
+// over the Driver's channel already does.
 func (rs *RollingStats) Record(r Result) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -239,15 +258,16 @@ func (rs *RollingStats) Snapshot() Snapshot {
 // buckets behind the current one, plus however far into the current one the
 // clock has moved. The caller holds rs.mu.
 //
-// It is capped at the age of the run, so a caller reading during the first
+// It never exceeds the age of the run, so a caller reading during the first
 // window gets the truth rather than a window padded with time that never
-// happened, and floored at one interval, because RPS divides by it and a
-// RollingStats read in the same instant it was built has covered nothing.
+// happened. That holds by construction rather than by clamping: curStart only
+// ever moves from origin by whole intervals, and the same rotation that moves it
+// raises live by the same count, so (live-1)*interval is at most curStart-origin.
+//
+// It is floored at one interval, because RPS divides by it and a RollingStats
+// read in the same instant it was built has covered nothing.
 func (rs *RollingStats) covered(now time.Time) time.Duration {
 	d := now.Sub(rs.curStart) + time.Duration(rs.live-1)*rs.interval
-	if age := now.Sub(rs.origin); d > age {
-		d = age
-	}
 	if d <= 0 {
 		d = rs.interval
 	}
@@ -274,9 +294,10 @@ func (rs *RollingStats) Window() Snapshot {
 
 	rs.scratch.reset()
 	for i := range rs.live {
-		// Walk back from the current bucket. Only live buckets are merged: the
-		// rest are empty, and skipping them keeps the cost proportional to the
-		// data rather than to Buckets.
+		// Walk back from the current bucket over the live ones only. Buckets
+		// beyond live have never been reached, so the cost tracks how much of
+		// the window the run has covered rather than Buckets; merge skips the
+		// live-but-empty ones, so a stall does not pay for them either.
 		idx := rs.idx - i
 		if idx < 0 {
 			idx += len(rs.ring)

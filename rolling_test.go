@@ -44,8 +44,15 @@ func TestNewRollingStatsTruncatesWindowToWholeBuckets(t *testing.T) {
 	}
 }
 
-func TestNewRollingStatsPanicsOnImpossibleConfig(t *testing.T) {
-	cases := []struct {
+// impossibleRollings are the configurations no defaulting can rescue. One table
+// drives both NewRollingStats and Bytes, because the two must agree: a config
+// that cannot be built must not be priceable either, and a table copied into one
+// test is a table that drifts out of the other.
+func impossibleRollings() []struct {
+	name string
+	cfg  Rolling
+} {
+	return []struct {
 		name string
 		cfg  Rolling
 	}{
@@ -55,10 +62,14 @@ func TestNewRollingStatsPanicsOnImpossibleConfig(t *testing.T) {
 		{"negative sigfigs", Rolling{Sigfigs: -1}},
 		{"sigfigs above the histogram maximum", Rolling{Sigfigs: 6}},
 		{"negative lo", Rolling{Lo: -time.Second}},
+		{"negative hi", Rolling{Hi: -time.Second}},
 		{"hi below lo", Rolling{Lo: time.Minute, Hi: time.Microsecond}},
+		{"hi equal to lo", Rolling{Lo: time.Second, Hi: time.Second}},
 	}
+}
 
-	for _, tc := range cases {
+func TestNewRollingStatsPanicsOnImpossibleConfig(t *testing.T) {
+	for _, tc := range impossibleRollings() {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func() {
 				if recover() == nil {
@@ -94,12 +105,20 @@ func TestRollingBytes(t *testing.T) {
 		// The knob that reads like resolution and is really a multiplier: same
 		// range, 100x the buckets, ~100x the memory.
 		{"a hundred buckets at the default range", Rolling{Buckets: 100}, 28409856},
+		// 266 MiB from a one-field struct literal. The README's memory table
+		// quotes this row and the three around it, so they are all pinned here.
+		{"a thousand buckets at the default range", Rolling{Buckets: 1000}, 279085056},
 		// countsLen 128 -> 1 KiB per histogram. Narrowing the range is what makes
 		// a large ring affordable.
 		{"a thousand narrow buckets", Rolling{
 			Window: 10 * time.Second, Buckets: 1000,
 			Lo: time.Millisecond, Hi: time.Second, Sigfigs: 1,
 		}, 2052096},
+		// Sub-microsecond Lo is legal and is the same size as the default: the
+		// histogram counts in whole microseconds, so anything under 1µs is one
+		// microsecond's resolution. Pinned because histogramCounts has to floor
+		// it the way hdr.New does, and nothing else exercises that path.
+		{"lo below the histogram's unit", Rolling{Lo: 500 * time.Nanosecond}, 3342336},
 	}
 
 	for _, tc := range cases {
@@ -113,13 +132,19 @@ func TestRollingBytes(t *testing.T) {
 
 func TestRollingBytesPanicsWhereNewRollingStatsDoes(t *testing.T) {
 	// Pricing a configuration that cannot be built must not quietly return a
-	// number for it.
-	defer func() {
-		if recover() == nil {
-			t.Fatal("Bytes() returned on an unbuildable config; want panic")
-		}
-	}()
-	_ = Rolling{Window: 5, Buckets: 10}.Bytes()
+	// number for it. Bytes never calls NewStatsRange, so the histogram-range
+	// rules have to be enforced on the way in: without them Rolling{Sigfigs: 6}
+	// reports a 1.3 GiB budget for a config whose constructor panics.
+	for _, tc := range impossibleRollings() {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("Rolling%+v.Bytes() returned; want panic", tc.cfg)
+				}
+			}()
+			_ = tc.cfg.Bytes()
+		})
+	}
 }
 
 func TestRollingRecordFeedsBothViews(t *testing.T) {
@@ -322,8 +347,14 @@ func TestRollingWindowImmediatelyAfterConstructionIsFinite(t *testing.T) {
 func TestRollingWindowMatchesAStatsFedTheSameLiveResults(t *testing.T) {
 	// The merge must not lose or double-count anything: a window wide enough to
 	// hold every Result must equal one Stats fed all of them.
+	//
+	// The geometry matters. 300 Results one second apart span 300s, so the ring
+	// has to retire nothing and rotate several times: 10 buckets of 60s over a
+	// 10-minute window puts the run in six of them. A window whose buckets are
+	// wider than the whole run would leave live == 1, and this test would then
+	// pass against a Window() that merged only the current bucket.
 	clk := NewManualClock(time.Unix(0, 0))
-	rs := NewRollingStats(Rolling{Window: time.Hour, Buckets: 10, Clock: clk})
+	rs := NewRollingStats(Rolling{Window: 10 * time.Minute, Buckets: 10, Clock: clk})
 	whole := NewStats()
 
 	for _, r := range buildMergeResults() {
@@ -333,6 +364,9 @@ func TestRollingWindowMatchesAStatsFedTheSameLiveResults(t *testing.T) {
 	}
 
 	win, want := rs.Window(), whole.Snapshot()
+	if rs.live < 2 {
+		t.Fatalf("live=%d; the merge path under test needs more than one bucket", rs.live)
+	}
 	if win.Count != want.Count || win.Errors != want.Errors || win.Bytes != want.Bytes {
 		t.Fatalf("counts differ: window %+v want %+v", win, want)
 	}

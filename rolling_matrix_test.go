@@ -10,6 +10,10 @@ import (
 // releases and two reviews missed a hang reachable from a four-line Driver
 // literal, because every suite tested the code that had been written rather
 // than the configurations a user can type. Rolling adds five knobs.
+
+// TestRollingWindowSeesAStallThatLifetimeStatsCannot is this feature's
+// acceptance test: the v0.3 review's M5, encoded. It does not compile against
+// v0.4.0, where RollingStats does not exist.
 func TestRollingWindowSeesAStallThatLifetimeStatsCannot(t *testing.T) {
 	clk := NewManualClock(time.Unix(0, 0))
 	rs := NewRollingStats(Rolling{Window: 5 * time.Second, Buckets: 5, Clock: clk})
