@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/RomanAgaltsev/metronome/compare/v0.5.0...v0.6.0) (2026-09-03)
+
+
+### Features
+
+* labeled stats and the Recorder seam ([#23](https://github.com/RomanAgaltsev/metronome/issues/23)) ([c26cbd6](https://github.com/RomanAgaltsev/metronome/commit/c26cbd61cb3de9e90665042ebe0af0a3cd6ddcd1))
+
 ## [0.5.0](https://github.com/RomanAgaltsev/metronome/compare/v0.4.0...v0.5.0) (2026-09-02)
 
 
