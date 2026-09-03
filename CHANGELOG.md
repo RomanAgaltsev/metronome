@@ -1,24 +1,13 @@
 # Changelog
 
-<!--
-MAINTAINER NOTE — fold this section into release-please's generated heading.
+> **On the version number.** This surface was first published in **v0.6.1**, which
+> release-please cut as a *patch*. The commit that added it ([#25]) carried a body line
+> its parser could not read, so the commit was discarded whole and the bump was computed
+> from the remaining `fix:` alone. v0.6.1 and v0.7.0 therefore contain the same public
+> API; v0.7.0 is the release that names and documents it, and is the one to depend on.
+> A CI check now rejects the body shape that caused it.
 
-release-please renders only the SUBJECT LINE of the commit that lands on main, and
-#25 was squash-merged with six commit bodies, so the v0.7.0 entry it generates will
-be one line: "recorder combinators and warmup exclusion (#25)". That is the third
-release in a row to hit this (see the notes on v0.5.0 and v0.6.0).
-
-So: when the release PR appears, replace this "## Unreleased" heading with the
-"## [0.7.0](...)" heading and date release-please generated, keep its bullet list
-of commits, and keep everything below. Then delete this comment.
-
-Going forward the PR template's release-note checkbox is what stops this
-happening a fourth time.
--->
-
-## Unreleased — v0.7.0
-
-### Features
+[#25]: https://github.com/RomanAgaltsev/metronome/pull/25
 
 #### Recorder combinators — fan out, filter, and exclude a warmup
 
@@ -157,7 +146,12 @@ loudly. `Duration()`'s doc records that a `Phased` controller is a *measurement*
 boundary, not a stop condition: `Rate` holds the last phase's rate past it, and a
 `Driver` runs until its context ends or `MaxRequests` is reached.
 
+## [0.6.1](https://github.com/RomanAgaltsev/metronome/compare/v0.6.0...v0.6.1) (2026-09-03)
+
+
 ### Bug Fixes
+
+* remediate the v0.6 + v0.7 review findings ([#26](https://github.com/RomanAgaltsev/metronome/issues/26)) ([c419132](https://github.com/RomanAgaltsev/metronome/commit/c419132c8f0ede73a1b1811b0fd992921f32ba1e))
 
 #### `After(0)` no longer skips Results
 
@@ -202,12 +196,6 @@ positive `d`, `AfterTime` and `AfterN` are unaffected.
   internally consistent. `Stats.Record` reads 201 ns/op where it previously read 147;
   nothing regressed — the two numbers came from different sessions on the same machine.
 
-## [0.6.1](https://github.com/RomanAgaltsev/metronome/compare/v0.6.0...v0.6.1) (2026-09-03)
-
-
-### Bug Fixes
-
-* remediate the v0.6 + v0.7 review findings ([#26](https://github.com/RomanAgaltsev/metronome/issues/26)) ([c419132](https://github.com/RomanAgaltsev/metronome/commit/c419132c8f0ede73a1b1811b0fd992921f32ba1e))
 
 ## [0.6.0](https://github.com/RomanAgaltsev/metronome/compare/v0.5.0...v0.6.0) (2026-09-03)
 
