@@ -201,27 +201,101 @@ func BenchmarkRollingStatsWindowStalled(b *testing.B) {
 	}
 }
 
+// labelSets returns n distinct single-entry Labels maps.
+//
+// They are built once, outside the measured loop, because a map literal inside
+// it would be measured too: stamping a label costs an allocation and roughly
+// 150 ns, which is comparable to Stats.Record itself and would be charged to
+// LabeledStats. BenchmarkLabelStampCost measures that separately, which is the
+// honest place for it — the cost belongs to Result.Labels being a map, not to
+// the breakdown reading it.
+func labelSets(key string, n int) []map[string]string {
+	sets := make([]map[string]string, n)
+	for i := range sets {
+		sets[i] = map[string]string{key: strconv.Itoa(i)}
+	}
+	return sets
+}
+
 // BenchmarkLabeledRecord measures the cost of a breakdown over a flat Stats.
-// Compare against BenchmarkStatsRecord: the difference is one extra child
-// Record plus the RWMutex lookup.
+//
+// The flat sub-benchmark is the baseline, not BenchmarkStatsRecord: that one
+// also stamps Scheduled and Code, which cost a second histogram write and a map
+// write that have nothing to do with LabeledStats. Comparing against it would
+// charge the breakdown for work it does not do. Here every sub-benchmark records
+// the identical Result, so the delta is the breakdown and nothing else.
+//
+// series=1 is the slowest of the three, not the fastest, and that is the result
+// rather than noise: with one series every goroutine contends on that single
+// child's mutex as well as the total's, where a hundred children spread the
+// child contention out and leave the total as the only shared lock. A breakdown
+// gets cheaper as it gets wider.
 func BenchmarkLabeledRecord(b *testing.B) {
+	base := time.Unix(0, 0)
+
+	record := func(b *testing.B, rec Recorder, labels []map[string]string) {
+		b.Helper()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			i := 0
+			for pb.Next() {
+				i++
+				rec.Record(Result{
+					Start:   base.Add(time.Duration(i) * time.Microsecond),
+					Latency: time.Millisecond,
+					Labels:  labels[i%len(labels)],
+				})
+			}
+		})
+	}
+
+	b.Run("flat", func(b *testing.B) {
+		record(b, NewStats(), labelSets("endpoint", 10))
+	})
+
 	for _, series := range []int{1, 10, 100} {
 		b.Run(fmt.Sprintf("series=%d", series), func(b *testing.B) {
 			ls := NewLabeledStats(Labeled[*Stats]{Key: "endpoint", New: NewStats, MaxSeries: 1000})
-			base := time.Unix(0, 0)
-
-			b.ResetTimer()
-			b.RunParallel(func(pb *testing.PB) {
-				i := 0
-				for pb.Next() {
-					i++
-					ls.Record(Result{
-						Start:   base.Add(time.Duration(i) * time.Microsecond),
-						Latency: time.Millisecond,
-						Labels:  map[string]string{"endpoint": strconv.Itoa(i % series)},
-					})
-				}
-			})
+			record(b, ls, labelSets("endpoint", series))
 		})
 	}
+}
+
+// BenchmarkLabelStampCost measures what stamping a Result.Labels map costs on
+// the hot path, by recording into a plain Stats — which ignores Labels — with
+// and without one.
+//
+// It is the measurement behind two documented decisions: Result.Labels' own
+// advice to leave it nil when unused, and the roadmap's reason for not having
+// Mix stamp a label of its own. Subtract the two to read it.
+func BenchmarkLabelStampCost(b *testing.B) {
+	base := time.Unix(0, 0)
+
+	b.Run("nil", func(b *testing.B) {
+		s := NewStats()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			i := 0
+			for pb.Next() {
+				i++
+				s.Record(Result{Start: base.Add(time.Duration(i) * time.Microsecond), Latency: time.Millisecond})
+			}
+		})
+	})
+
+	b.Run("stamped", func(b *testing.B) {
+		s := NewStats()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			i := 0
+			for pb.Next() {
+				i++
+				s.Record(Result{
+					Start:   base.Add(time.Duration(i) * time.Microsecond),
+					Latency: time.Millisecond,
+					Labels:  map[string]string{"endpoint": strconv.Itoa(i % 10)},
+				})
+			}
+		})
+	})
 }
