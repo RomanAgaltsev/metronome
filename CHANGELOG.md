@@ -146,6 +146,13 @@ loudly. `Duration()`'s doc records that a `Phased` controller is a *measurement*
 boundary, not a stop condition: `Rate` holds the last phase's rate past it, and a
 `Driver` runs until its context ends or `MaxRequests` is reached.
 
+## [0.7.0](https://github.com/RomanAgaltsev/metronome/compare/v0.6.1...v0.7.0) (2026-09-03)
+
+
+### Features
+
+* recorder combinators — Multi, Filter, After, AfterTime, AfterN, Drain ([#29](https://github.com/RomanAgaltsev/metronome/issues/29)) ([92f2ea0](https://github.com/RomanAgaltsev/metronome/commit/92f2ea00897b8f05cbe66b2e492c611eb9abca81))
+
 ## [0.6.1](https://github.com/RomanAgaltsev/metronome/compare/v0.6.0...v0.6.1) (2026-09-03)
 
 
