@@ -1,0 +1,72 @@
+name: commit-bodies
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  parseable:
+    name: bodies release-please can parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: reject body lines that drop a commit from the changelog
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # release-please parses every commit with a conventional-commit grammar.
+          # A body line that STARTS with an identifier followed by "(" is read as a
+          # "type(scope):" header. Inside that scope the only valid token is ")", so
+          # a SECOND "(" before the closing one fails the parse -- and the whole
+          # commit is then discarded: no changelog entry, and no contribution to the
+          # version bump. The release job still reports success.
+          #
+          # The nesting is what breaks it, which is why this pattern is narrow:
+          #
+          #   Multi(After(a),b) are different programs   <- dropped (metronome #25)
+          #   len(strings.Split(s, sep)) <= len(s)+1,    <- dropped (bigo #181)
+          #   After(0) anchored on the first Result      <- parses fine, released
+          #   b.Merge(a) terminate instead of dead...    <- parses fine, released
+          #
+          # Verified against 40 commits of this repo's history: one hit, and it is
+          # the commit whose loss made v0.6.1 a patch release carrying seven new
+          # public symbols. This runs before the merge, the only point it is fixable.
+
+          fail=0
+          for sha in $(git rev-list "$BASE_SHA".."$HEAD_SHA"); do
+            hits=$(git log -1 --format='%b' "$sha" \
+                   | grep -nE '^[A-Za-z_][A-Za-z0-9_.]*\([^)]*\(' || true)
+            [ -z "$hits" ] && continue
+            fail=1
+            echo "::error::$(git log -1 --format='%h %s' "$sha") -- body line release-please cannot parse"
+            printf '%s\n' "$hits" | sed 's/^/    body line /'
+            echo
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            cat <<'MSG'
+          A commit body line begins with a nested call, e.g. `Multi(After(a),b)`.
+          release-please discards such a commit entirely: it reaches neither the
+          CHANGELOG nor the version bump, and the release job still goes green.
+
+          Fix by rewording so the line does not START with that call:
+
+            reflow    "The two forms Multi(After(a),b) and ... are different"
+            indent    "  Multi(After(a),b) are different programs"
+            backtick  "`Multi(After(a),b)` are different programs"
+
+          Amend the commit body (git rebase -i / git commit --amend). Do not relax
+          this check -- it is guarding a silent, permanent loss.
+          MSG
+            exit 1
+          fi
+
+          echo "all commit bodies parse"
