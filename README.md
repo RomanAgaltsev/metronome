@@ -237,6 +237,25 @@ the stall case a control loop polls hardest in is the cheap one. Reproduce with:
 go test -run '^$' -bench 'BenchmarkStatsRecord|BenchmarkRollingStats' -benchtime=2s -benchmem ./...
 ```
 
+### Warmup exclusion and fan-out
+
+The first seconds of a run measure cold connection pools, TLS handshakes that will be reused and
+a target that has not warmed up — none of which is the system under test. `After` keeps them out
+of the measurement without changing the load:
+
+```go
+report  := metronome.NewStats()
+byRoute := metronome.NewLabeledStats(metronome.Labeled[*metronome.Stats]{
+    Key: "endpoint", New: metronome.NewStats,
+})
+
+measured := metronome.After(10*time.Second, metronome.Multi(report, byRoute))
+metronome.Drain(driver.Run(ctx), measured)
+
+fmt.Println(report.Snapshot())
+fmt.Printf("measured %d, excluded %d as warmup\n",
+    report.Snapshot().Count, measured.Skipped())
+
 #### Memory
 
 A `RollingStats` allocates `Buckets+2` histogram pairs — the ring, the lifetime

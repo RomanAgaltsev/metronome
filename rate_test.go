@@ -71,3 +71,60 @@ func TestAdaptiveConcurrent(t *testing.T) {
 	}
 	<-done
 }
+
+func TestPhasedPhaseEndAccumulatesDurations(t *testing.T) {
+	p := Phased{Phases: []Phase{
+		{Duration: 10 * time.Second, TargetRPS: 50},
+		{Duration: 30 * time.Second, TargetRPS: 200},
+		{Duration: 20 * time.Second, TargetRPS: 100},
+	}}
+
+	for i, want := range []time.Duration{10 * time.Second, 40 * time.Second, 60 * time.Second} {
+		if got := p.PhaseEnd(i); got != want {
+			t.Fatalf("PhaseEnd(%d)=%v want %v", i, got, want)
+		}
+	}
+}
+
+func TestPhasedDurationIsTheLastPhaseEnd(t *testing.T) {
+	p := Phased{Phases: []Phase{
+		{Duration: 10 * time.Second, TargetRPS: 50},
+		{Duration: 30 * time.Second, TargetRPS: 200},
+	}}
+
+	if got, want := p.Duration(), 40*time.Second; got != want {
+		t.Fatalf("Duration()=%v want %v", got, want)
+	}
+	if got, want := p.Duration(), p.PhaseEnd(len(p.Phases)-1); got != want {
+		t.Fatalf("Duration()=%v want PhaseEnd(last)=%v", got, want)
+	}
+}
+
+func TestPhasedDurationOfNoPhasesIsZero(t *testing.T) {
+	if got := (Phased{}).Duration(); got != 0 {
+		t.Fatalf("Duration()=%v want 0", got)
+	}
+}
+
+func TestPhasedPhaseEndPanicsOutOfRange(t *testing.T) {
+	p := Phased{Phases: []Phase{{Duration: time.Second, TargetRPS: 1}}}
+	for name, i := range map[string]int{"negative": -1, "past the end": 1, "far past": 99} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("PhaseEnd(%d) did not panic", i)
+				}
+			}()
+			p.PhaseEnd(i)
+		})
+	}
+}
+
+func TestPhasedPhaseEndPanicsOnNoPhases(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("PhaseEnd(0) on an empty Phased did not panic")
+		}
+	}()
+	(Phased{}).PhaseEnd(0)
+}
