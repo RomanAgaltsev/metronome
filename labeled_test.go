@@ -195,6 +195,53 @@ func TestLabeledStatsMergesARealValueCollidingWithTheOverflowName(t *testing.T) 
 	}
 }
 
+func TestLabeledStatsMergesARealValueCollidingWithTheUnlabeledName(t *testing.T) {
+	// The other half of the collision rule: both sentinels are configurable
+	// precisely because a real label value can equal one, and when it does the
+	// two share a series rather than one of them being lost.
+	ls := newLabeled(t, Labeled[*Stats]{})
+	base := time.Unix(0, 0)
+
+	ls.Record(labelled("endpoint", DefaultUnlabeledLabel, time.Millisecond, base))
+	ls.Record(Result{Start: base.Add(time.Millisecond), Latency: time.Millisecond}) // genuinely unlabeled
+
+	series := ls.Series()
+	if got := len(series); got != 1 {
+		t.Fatalf("len(Series())=%d want 1 — the real value and the unlabeled sentinel share a series", got)
+	}
+	if got := series[DefaultUnlabeledLabel].Snapshot().Count; got != 2 {
+		t.Fatalf("unlabeled series Count=%d want 2", got)
+	}
+	if got, want := sumSeriesCount(ls), ls.Snapshot().Count; got != want {
+		t.Fatalf("collision broke the invariant: series=%d total=%d", got, want)
+	}
+}
+
+func TestLabeledStatsUnlabeledSeriesCountsAgainstMaxSeries(t *testing.T) {
+	// Documented on Labeled.MaxSeries: the unlabeled sentinel is created by the
+	// same lazy path a real value takes, so it consumes a slot. At MaxSeries 2,
+	// unlabeled traffic plus two real values leaves room for only one of them.
+	ls := newLabeled(t, Labeled[*Stats]{MaxSeries: 2})
+	base := time.Unix(0, 0)
+
+	ls.Record(Result{Start: base, Latency: time.Millisecond}) // unlabeled: slot 1
+	ls.Record(labelled("endpoint", "a", time.Millisecond, base.Add(time.Millisecond)))
+	ls.Record(labelled("endpoint", "b", time.Millisecond, base.Add(2*time.Millisecond)))
+
+	series := ls.Series()
+	for _, want := range []string{DefaultUnlabeledLabel, "a", DefaultOverflowLabel} {
+		if _, ok := series[want]; !ok {
+			t.Fatalf("series %q missing; got %v", want, series)
+		}
+	}
+	if got := len(series); got != 3 {
+		t.Fatalf("len(Series())=%d want 3, got %v", got, series)
+	}
+	if got, want := sumSeriesCount(ls), ls.Snapshot().Count; got != want {
+		t.Fatalf("series=%d total=%d", got, want)
+	}
+}
+
 func TestLabeledStatsRecordIsSafeUnderConcurrentSeriesCreation(t *testing.T) {
 	ls := newLabeled(t, Labeled[*Stats]{MaxSeries: 4})
 	base := time.Unix(0, 0)
