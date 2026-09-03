@@ -202,6 +202,13 @@ positive `d`, `AfterTime` and `AfterN` are unaffected.
   internally consistent. `Stats.Record` reads 201 ns/op where it previously read 147;
   nothing regressed — the two numbers came from different sessions on the same machine.
 
+## [0.6.1](https://github.com/RomanAgaltsev/metronome/compare/v0.6.0...v0.6.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* remediate the v0.6 + v0.7 review findings ([#26](https://github.com/RomanAgaltsev/metronome/issues/26)) ([c419132](https://github.com/RomanAgaltsev/metronome/commit/c419132c8f0ede73a1b1811b0fd992921f32ba1e))
+
 ## [0.6.0](https://github.com/RomanAgaltsev/metronome/compare/v0.5.0...v0.6.0) (2026-09-03)
 
 
