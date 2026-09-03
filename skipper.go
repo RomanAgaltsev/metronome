@@ -2,6 +2,7 @@ package metronome
 
 import (
 	"sync"
+	"time"
 )
 
 // Skipper is a Recorder that excludes some Results from the recorder it wraps
@@ -88,4 +89,84 @@ func AfterN(n int64, rec Recorder) *Skipper {
 		panic("metronome: AfterN n must be >= 0")
 	}
 	return newSkipper(rec, &countRule{n: n})
+}
+
+// resultStamp is the point on the run's timeline r belongs to: the schedule it
+// was due on, or when it actually started if it carries no schedule. A zero
+// time means the Result cannot be placed at all.
+func resultStamp(r Result) time.Time {
+	if !r.Scheduled.IsZero() {
+		return r.Scheduled
+	}
+	return r.Start
+}
+
+// timeRule admits Results stamped at or after from. When anchored is false,
+// from is computed from the first placeable Result's stamp plus d.
+type timeRule struct {
+	d        time.Duration
+	from     time.Time
+	anchored bool
+}
+
+func (t *timeRule) admit(r Result) bool {
+	stamp := resultStamp(r)
+	if stamp.IsZero() {
+		// Unplaceable: it cannot be said to be inside or outside the excluded
+		// region, and admitting it would be a guess.
+		return false
+	}
+	if !t.anchored {
+		t.from = stamp.Add(t.d)
+		t.anchored = true
+	}
+	return !stamp.Before(t.from)
+}
+
+// After returns a Skipper that excludes Results scheduled within d of the
+// run's start, then admits the rest. It panics if d is negative or rec is nil.
+//
+// Use it to keep a warmup out of a measurement: cold connection pools, TLS
+// handshakes that will be reused, an empty page cache and a target that has not
+// warmed up are not the system under test, and a percentile threshold asserted
+// over them is asserted over the handshake. Phased can drive a gentler opening
+// phase, but it changes the load rather than the measurement — those Results
+// still land in the same Stats.
+//
+// The boundary is anchored on the first Result's Scheduled stamp, falling back
+// to Start, so it is fixed by the stream rather than by when this Skipper was
+// constructed, and it is measured against the schedule rather than against when
+// the generator got there. A Result carrying neither stamp is skipped and
+// counted, and does not set the anchor; under a Driver that never happens,
+// because the Driver stamps Start even when a Runner forgets.
+//
+// Admission is decided per Result, not as a one-way switch, so a unit that was
+// due inside the warmup is excluded even if it arrives after one that was due
+// outside it — which happens routinely, because Results arrive off a channel
+// fed by many workers.
+//
+// The anchor can be up to one reordering window late, since the first Result
+// seen need not be the earliest scheduled. That is negligible against a warmup
+// measured in seconds; use AfterTime when the boundary must be exact.
+//
+// After(0) admits every placeable Result.
+func After(d time.Duration, rec Recorder) *Skipper {
+	if d < 0 {
+		panic("metronome: After d must be >= 0")
+	}
+	return newSkipper(rec, &timeRule{d: d})
+}
+
+// AfterTime returns a Skipper that excludes Results scheduled before t, then
+// admits the rest. It panics if rec is nil.
+//
+// It is the exact form of After, for a caller who knows the run's origin:
+// record clock.Now() immediately before Driver.Run and pass
+// origin.Add(warmup). Unlike After it does not infer the boundary from the
+// stream, so it is unaffected by which Result arrives first.
+//
+// Results carrying neither a Scheduled nor a Start stamp are skipped and
+// counted, as with After.
+func AfterTime(t time.Time, rec Recorder) *Skipper {
+	return newSkipper(rec, &timeRule{from: t, anchored: true})
 }

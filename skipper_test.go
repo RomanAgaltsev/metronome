@@ -122,3 +122,192 @@ func TestSkipperIsSafeUnderConcurrentRecord(t *testing.T) {
 		t.Fatalf("Skipped()=%d want exactly 50", got)
 	}
 }
+
+// timeline builds Results spaced 1ms apart from base, with Scheduled and Start
+// separated by lag so the two can be told apart.
+func timeline(base time.Time, n int, lag time.Duration) []Result {
+	out := make([]Result, 0, n)
+	for i := range n {
+		sched := base.Add(time.Duration(i) * time.Millisecond)
+		out = append(out, Result{
+			Scheduled: sched,
+			Start:     sched.Add(lag),
+			Latency:   time.Millisecond,
+		})
+	}
+	return out
+}
+
+func TestAfterExcludesResultsScheduledInsideTheWarmup(t *testing.T) {
+	base := time.Unix(0, 0)
+	stub := &recordingStub{}
+	s := After(10*time.Millisecond, stub)
+
+	for _, r := range timeline(base, 30, 0) {
+		s.Record(r)
+	}
+
+	// Results at 0..9ms are inside the warmup; 10..29ms are admitted.
+	if got := len(stub.got); got != 20 {
+		t.Fatalf("recorded %d Results, want 20", got)
+	}
+	if got := s.Skipped(); got != 10 {
+		t.Fatalf("Skipped()=%d want 10", got)
+	}
+	if got := stub.got[0].Scheduled.Sub(base); got != 10*time.Millisecond {
+		t.Fatalf("first admitted Result scheduled at %v, want 10ms", got)
+	}
+}
+
+func TestAfterAnchorsOnScheduledNotOnStart(t *testing.T) {
+	// A sagging generator starts units long after they were due. Anchoring on
+	// Start would move the whole boundary by the lag; anchoring on the schedule
+	// is the v0.3 principle and is what this asserts.
+	base := time.Unix(0, 0)
+	const lag = 500 * time.Millisecond
+
+	onSchedule := &recordingStub{}
+	s := After(10*time.Millisecond, onSchedule)
+	for _, r := range timeline(base, 30, lag) {
+		s.Record(r)
+	}
+
+	if got := len(onSchedule.got); got != 20 {
+		t.Fatalf("recorded %d Results, want 20 — the lag must not move the boundary", got)
+	}
+	if got := onSchedule.got[0].Scheduled.Sub(base); got != 10*time.Millisecond {
+		t.Fatalf("first admitted Result scheduled at %v, want 10ms", got)
+	}
+}
+
+func TestAfterFallsBackToStartWhenThereIsNoSchedule(t *testing.T) {
+	base := time.Unix(0, 0)
+	stub := &recordingStub{}
+	s := After(10*time.Millisecond, stub)
+
+	for i := range 30 {
+		s.Record(Result{Start: base.Add(time.Duration(i) * time.Millisecond), Latency: time.Millisecond})
+	}
+
+	if got := len(stub.got); got != 20 {
+		t.Fatalf("recorded %d Results, want 20", got)
+	}
+}
+
+func TestAfterSkipsUnplaceableResults(t *testing.T) {
+	// No Scheduled and no Start: the Result cannot be put on the timeline, so
+	// it cannot be said to be inside or outside the warmup. It is skipped and
+	// counted rather than guessed at, and it does not set the anchor.
+	stub := &recordingStub{}
+	s := After(10*time.Millisecond, stub)
+
+	for range 5 {
+		s.Record(Result{Latency: time.Millisecond})
+	}
+
+	if got := len(stub.got); got != 0 {
+		t.Fatalf("recorded %d unplaceable Results, want 0", got)
+	}
+	if got := s.Skipped(); got != 5 {
+		t.Fatalf("Skipped()=%d want 5", got)
+	}
+
+	// A placeable Result arriving afterwards sets the anchor normally.
+	base := time.Unix(100, 0)
+	for _, r := range timeline(base, 30, 0) {
+		s.Record(r)
+	}
+	if got := len(stub.got); got != 20 {
+		t.Fatalf("recorded %d Results after the anchor was set, want 20", got)
+	}
+}
+
+func TestAfterAdmitsPerResultNotAsAOneWaySwitch(t *testing.T) {
+	// Results arrive off a channel fed by N workers, so Scheduled is not
+	// monotonic. A unit due at 9ms arriving after one due at 11ms must still be
+	// excluded.
+	base := time.Unix(0, 0)
+	stub := &recordingStub{}
+	s := After(10*time.Millisecond, stub)
+
+	at := func(d time.Duration) Result {
+		return Result{Scheduled: base.Add(d), Start: base.Add(d), Latency: time.Millisecond}
+	}
+
+	s.Record(at(0))                     // anchor, inside
+	s.Record(at(11 * time.Millisecond)) // admitted
+	s.Record(at(9 * time.Millisecond))  // late arrival, still inside the warmup
+	s.Record(at(12 * time.Millisecond)) // admitted
+
+	if got := len(stub.got); got != 2 {
+		t.Fatalf("recorded %d Results, want 2", got)
+	}
+	if got := s.Skipped(); got != 2 {
+		t.Fatalf("Skipped()=%d want 2", got)
+	}
+}
+
+func TestAfterZeroAdmitsEveryPlaceableResult(t *testing.T) {
+	base := time.Unix(0, 0)
+	stub := &recordingStub{}
+	s := After(0, stub)
+
+	for _, r := range timeline(base, 10, 0) {
+		s.Record(r)
+	}
+
+	if got := len(stub.got); got != 10 {
+		t.Fatalf("recorded %d Results, want 10", got)
+	}
+	if got := s.Skipped(); got != 0 {
+		t.Fatalf("Skipped()=%d want 0", got)
+	}
+}
+
+func TestAfterLongerThanTheRunAdmitsNothing(t *testing.T) {
+	base := time.Unix(0, 0)
+	stub := &recordingStub{}
+	s := After(time.Hour, stub)
+
+	for _, r := range timeline(base, 30, 0) {
+		s.Record(r)
+	}
+
+	if got := len(stub.got); got != 0 {
+		t.Fatalf("recorded %d Results, want 0", got)
+	}
+	if got := s.Skipped(); got != 30 {
+		t.Fatalf("Skipped()=%d want 30", got)
+	}
+}
+
+func TestAfterPanicsOnANegativeDuration(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("After(-1) did not panic")
+		}
+	}()
+	After(-time.Nanosecond, &recordingStub{})
+}
+
+func TestAfterTimeUsesTheGivenOriginExactly(t *testing.T) {
+	// After anchors on the first Result seen, which under N workers need not be
+	// the earliest scheduled. AfterTime is the exact form for a caller who
+	// recorded the run's origin themselves.
+	base := time.Unix(0, 0)
+	stub := &recordingStub{}
+	s := AfterTime(base.Add(10*time.Millisecond), stub)
+
+	// The stream starts late — at 5ms — so After would anchor there and admit
+	// from 15ms. AfterTime admits from 10ms regardless.
+	for _, r := range timeline(base.Add(5*time.Millisecond), 20, 0) {
+		s.Record(r)
+	}
+
+	if got := len(stub.got); got != 15 {
+		t.Fatalf("recorded %d Results, want 15", got)
+	}
+	if got := stub.got[0].Scheduled.Sub(base); got != 10*time.Millisecond {
+		t.Fatalf("first admitted Result scheduled at %v, want 10ms", got)
+	}
+}
