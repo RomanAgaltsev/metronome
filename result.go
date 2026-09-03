@@ -37,10 +37,16 @@ type Result struct {
 	Bytes   int64
 
 	// Labels is caller-side metadata carried alongside the Result, e.g.
-	// {"endpoint": "get_user"}. Stats does not aggregate it: a per-label
-	// breakdown helper is roadmapped, and until it exists a caller who needs
-	// one keys their own map off these Results. Leave it nil if unused — it is
-	// an allocation per request.
+	// {"endpoint": "get_user"}.
+	//
+	// Stats ignores it; LabeledStats is what reads it back, splitting the stream
+	// on one key into a child Recorder per value plus a total:
+	//
+	//	NewLabeledStats(Labeled[*Stats]{Key: "endpoint", New: NewStats})
+	//
+	// Leave it nil if unused. It is a map, so stamping one costs an allocation
+	// and roughly 150ns per request — measured, and the reason Mix does not
+	// stamp a label of its own.
 	Labels map[string]string
 }
 

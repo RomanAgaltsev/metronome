@@ -1,6 +1,9 @@
 package metronome
 
-import "slices"
+import (
+	"slices"
+	"strconv"
+)
 
 // Multi returns a Recorder that records each Result into every rec, in
 // argument order. It panics if given no recorders.
@@ -31,6 +34,15 @@ import "slices"
 func Multi(recs ...Recorder) Recorder {
 	if len(recs) == 0 {
 		panic("metronome: Multi requires at least one Recorder")
+	}
+	// Nil is caught here rather than at the first Record, so it reports itself as
+	// a named construction error while the caller is still looking at the
+	// argument list — the same rule the rest of the package follows: panic at
+	// construction, not mid-flight.
+	for i, rec := range recs {
+		if rec == nil {
+			panic("metronome: Multi Recorder " + strconv.Itoa(i) + " is nil")
+		}
 	}
 	// The caller may retain and mutate the slice they passed — a variadic call
 	// site like Multi(recs...) hands us their slice, not a copy.
@@ -92,7 +104,13 @@ func (f *filter) Snapshot() Snapshot { return f.rec.Snapshot() }
 // would be a leak generator in the shape of good practice. Cancel the Driver's
 // context instead: it stops, closes the channel, and this returns because the
 // range ended.
+//
+// It panics if rec is nil, rather than on the first Result to arrive — which,
+// on a live run, would be after the Driver had already started generating load.
 func Drain(ch <-chan Result, rec Recorder) {
+	if rec == nil {
+		panic("metronome: Drain rec must not be nil")
+	}
 	for r := range ch {
 		rec.Record(r)
 	}

@@ -60,7 +60,7 @@ for r := range d.Run(context.Background()) {
 }
 
 fmt.Println(stats.Snapshot())
-// 5000 requests, 198.7 rps, 0.14% err (0 saturated), p50/p95/p99 12ms/41ms/88ms,
+// 5000 req, 198.7 rps, 0.14% err (0 saturated), p50/p95/p99 12ms/41ms/88ms,
 // corrected p95/p99 41ms/89ms, behind schedule 1.2ms
 ```
 
@@ -92,6 +92,17 @@ abandoning a live channel leaks the workers.
 | `Snapshot.String()` | the numbers a run is judged on, in the order to read them |
 | `Snapshot.Corrected*` | coordinated-omission-corrected percentiles (see the caveat below) |
 | `Clock` / `ManualClock` | injected time, for deterministic tests |
+| `Recorder` | the aggregate seam: `Record` + `Snapshot`; `Stats`, `RollingStats` and `LabeledStats` all satisfy it |
+| `LabeledStats` / `Labeled` | per-label breakdown — a child `Recorder` per `Result.Labels` value, plus a real total |
+| `MaxSeries` + `__overflow__` | cardinality cap, so a mislabelled run loses reporting detail rather than memory |
+| `Multi(...Recorder)` | fan one `Result` to several recorders, without a second channel |
+| `Filter(keep, rec)` | record only the `Result`s a predicate accepts |
+| `After` / `AfterTime` / `AfterN` | warmup exclusion, anchored on `Result.Scheduled` |
+| `Skipper.Skipped()` | what an exclusion left out, so `Count + Skipped` is the whole population |
+| `Drain(ch, rec)` | the canonical result-channel loop, named so it stops being rewritten |
+| `Stats.Merge` | fold one `Stats` into another — ad-hoc subtotals, sharded recording, combining runs |
+| `Bytes()` on `Stats` / `RollingStats` / `LabeledStats` / `Rolling` | price the histogram memory, before or after building it |
+| `Phased.PhaseEnd` / `Phased.Duration` | phase boundaries, so a warmup and a phase table cannot drift |
 
 ## Pacing model — read this before trusting the numbers
 
@@ -222,12 +233,12 @@ Measured on the machine described under [Measured accuracy](#measured-accuracy):
 
 | Operation | Cost |
 |---|---|
-| `Stats.Record` | 147 ns/op |
-| `RollingStats.Record` | 223 ns/op — about **+75 ns**, or 1.5×, for the second view |
-| `Window()`, ring full of traffic | 730 µs/op, 2 allocs |
-| `Window()`, ring live but empty (a stall) | 2.7 µs/op, 2 allocs |
+| `Stats.Record` | 201 ns/op |
+| `RollingStats.Record` | 256 ns/op — about **+55 ns**, or 1.3×, for the second view |
+| `Window()`, ring full of traffic | 774 µs/op, 2 allocs |
+| `Window()`, ring live but empty (a stall) | 3.1 µs/op, 2 allocs |
 
-`Record` is the hot path and pays a flat 75 ns. `Window()` is not: it merges the
+`Record` is the hot path and pays a flat 55 ns. `Window()` is not: it merges the
 live buckets' histograms, so it costs roughly `live × countsLen`, independent of
 how many `Result`s are in them — 0.7 ms at the default range and a full ring. Poll
 it at 1–10 Hz from a control loop, not per request. Empty buckets are skipped, so
@@ -237,24 +248,6 @@ the stall case a control loop polls hardest in is the cheap one. Reproduce with:
 go test -run '^$' -bench 'BenchmarkStatsRecord|BenchmarkRollingStats' -benchtime=2s -benchmem ./...
 ```
 
-### Warmup exclusion and fan-out
-
-The first seconds of a run measure cold connection pools, TLS handshakes that will be reused and
-a target that has not warmed up — none of which is the system under test. `After` keeps them out
-of the measurement without changing the load:
-
-```go
-report  := metronome.NewStats()
-byRoute := metronome.NewLabeledStats(metronome.Labeled[*metronome.Stats]{
-    Key: "endpoint", New: metronome.NewStats,
-})
-
-measured := metronome.After(10*time.Second, metronome.Multi(report, byRoute))
-metronome.Drain(driver.Run(ctx), measured)
-
-fmt.Println(report.Snapshot())
-fmt.Printf("measured %d, excluded %d as warmup\n",
-    report.Snapshot().Count, measured.Skipped())
 
 #### Memory
 
@@ -283,21 +276,140 @@ rediscovery.
 
 ### Per-endpoint breakdown
 
-A `Mix` of ten endpoints reports one P99 that no endpoint exhibits. `LabeledStats` splits the
-stream on one `Result.Labels` key:
+A `Mix` of ten endpoints reports one P99 that no endpoint exhibits. `LabeledStats`
+splits the stream on one `Result.Labels` key:
 
 ```go
 stats := metronome.NewLabeledStats(metronome.Labeled[*metronome.Stats]{
-    Key: "endpoint",
-    New: metronome.NewStats,
+	Key: "endpoint",
+	New: metronome.NewStats,
 })
-for r := range driver.Run(ctx) {
-    stats.Record(r)
+for r := range d.Run(ctx) {
+	stats.Record(r)
 }
 
 stats.Snapshot()                      // the total — same as a plain Stats
 stats.Series()["search"].Snapshot()   // just that endpoint
+```
 
+The total is *exactly* what a plain `Stats` fed the same stream would have
+produced, so existing code holding a `*Stats` can hold one of these instead and
+see its numbers unchanged. The breakdown is something it gains, not something it
+trades for. Every `Result` lands in the total and in exactly one series, so
+`Σ Series().Count == Snapshot().Count` — the breakdown reads as a decomposition
+rather than as a sample.
+
+`LabeledStats` is generic over the child recorder, so use
+`Labeled[*metronome.RollingStats]` for a trailing window per endpoint —
+`stats.Series()["search"].Window()`, typed, no assertion. That is the one that
+answers *which endpoint is slow **right now***, which is the live question.
+
+A `Result` whose `Labels` is nil, lacks the key, or holds an empty string for it
+goes to a named `__none__` series rather than being dropped, because "which
+requests were not labelled?" is exactly the debugging question.
+
+**Cardinality is memory.** Each series is a whole aggregate, not three counters,
+so `MaxSeries` (default 100) caps it and further values share an `__overflow__`
+series:
+
+| Child | Per series | 10 series | 100 series |
+|---|---|---|---|
+| `*Stats`, default range | 272 KiB | ~3.3 MiB | ~27 MiB |
+| `*RollingStats`, `Rolling{}` | ~3.2 MiB | ~38 MiB | **~320 MiB** |
+
+The bottom-right figure is the one to know before you type
+`Labeled{Key: "endpoint"}`. It is not a defect — it is ten buckets of two
+histograms for each of a hundred endpoints, every term of which you asked for —
+but series are created lazily, so a run only discovers it if the cardinality turns
+out to be real. That is what the cap is for: a label value that turns out to carry
+a request ID rather than a route name costs you reporting detail, not memory.
+
+`stats.Bytes()` reports what is currently held, and `-1` if the child type does
+not report its own size (which a custom `Recorder` is not required to do). The
+`__none__` series counts against `MaxSeries`; `__overflow__` does not.
+
+Measured cost of the breakdown, on the machine described under
+[Measured accuracy](#measured-accuracy). Every row records the identical `Result`,
+so the delta is the breakdown and nothing else:
+
+| | ns/op | allocs |
+|---|---|---|
+| a flat `Stats`, same Results | 107 | 0 |
+| `LabeledStats`, 1 series | 389 | 0 |
+| `LabeledStats`, 10 series | 342 | 0 |
+| `LabeledStats`, 100 series | 352 | 0 |
+
+**A breakdown costs about 3.3× a flat `Stats`** — roughly +250 ns per `Result`,
+zero allocations. Two aggregates rather than one is about half of that; the rest
+is the label lookup, the `RWMutex` and the extra lock traffic. It is not free, and
+at 350 ns it is still far below any real request.
+
+The shape matters more than the level: **100 series costs 0.90× what 1 series
+costs**, so the map does not bind as cardinality grows. With a single series every
+goroutine contends on that one child's mutex as well as the total's; spreading the
+traffic across a hundred children removes the child contention. A breakdown gets
+cheaper as it gets wider.
+
+Stamping the label is a separate cost, paid by whoever sets `Result.Labels`
+whether or not anything reads it, and it is not counted above. Recording a
+`Result` carrying a one-entry `Labels` map into a plain `Stats` — which ignores
+it — costs **354 ns against 91 ns with `Labels` nil: +263 ns and 2 allocations**,
+for the map alone. Leave it nil when you are not breaking down. Reproduce with:
+
+```bash
+go test -run '^$' -bench 'BenchmarkLabeledRecord|BenchmarkLabelStampCost' -benchtime=2s -benchmem ./...
+```
+
+### Warmup exclusion and fan-out
+
+The first seconds of a run measure cold connection pools, TLS handshakes that will
+be reused and a target that has not warmed up — none of which is the system under
+test. `After` keeps them out of the measurement without changing the load:
+
+```go
+report  := metronome.NewStats()
+byRoute := metronome.NewLabeledStats(metronome.Labeled[*metronome.Stats]{
+	Key: "endpoint", New: metronome.NewStats,
+})
+
+measured := metronome.After(10*time.Second, metronome.Multi(report, byRoute))
+metronome.Drain(d.Run(ctx), measured)
+
+fmt.Println(report.Snapshot())
+fmt.Printf("measured %d, excluded %d as warmup\n",
+	report.Snapshot().Count, measured.Skipped())
+```
+
+`Count + Skipped()` is always the whole population, so an exclusion is auditable.
+"Measured 4,500 of 5,000 — 500 excluded as warmup" is the honest line; "4,500
+requests" alone invites the reader to wonder where the rest went, and a threshold
+evaluated over a silently reduced population is the thing this exists to prevent.
+
+The boundary anchors on the first `Result`'s `Scheduled` stamp, so it is fixed by
+the stream rather than by when you built the recorder — measured against the
+schedule, not against when the generator got there. Pair it with `Phased` to keep
+one source of truth: `metronome.After(rate.PhaseEnd(0), stats)` cannot drift from
+the phase table the way a repeated literal duration can. Use `AfterTime` when the
+boundary must be exact (record `clock.Now()` immediately before `Run` and pass
+`origin.Add(warmup)`), and `AfterN` to count units instead of time. `After(0)`
+admits everything and never anchors, so an unset `--warmup` means exactly nothing.
+
+Order is visible in the expression, and both readings are valid:
+`After(w, Multi(report, byRoute))` gives two views of one warmed population;
+`Multi(After(w, report), byRoute)` gives a warmed report beside an unwarmed
+breakdown.
+
+**`Multi` is synchronous.** Everything in one should be an in-memory aggregate.
+Time spent in `Record` is time not spent receiving from the result channel, so a
+slow writer fills the channel, then the `Driver`'s delivery backlog, and in open
+loop surfaces as `ErrSaturated` — which reads as "the generator ran out of workers"
+and is counted inside `Errors` and `ErrorRate`. **A slow file writer in a `Multi`
+can therefore present itself as a target problem.** Put I/O behind your own
+buffered goroutine, where you own the policy for what happens when it falls behind.
+
+Every recorder in a `Multi` receives the same `Result`, and `Result` holds `Labels`
+by reference, so treat `Result`s as read-only: a recorder that mutates the map
+corrupts what the others see, including the series `LabeledStats` picks.
 
 ### Measured accuracy
 
@@ -325,8 +437,9 @@ Per-request kernel overhead (no-op `Runner`, unlimited rate, `Workers = GOMAXPRO
 **600 ns/op** closed-loop and **895 ns/op** open-loop, i.e. a plumbing ceiling near
 **1.7M rps** and **1.1M rps** respectively. Note the gap between that ceiling and the
 5,000 rps adherence figure above: metronome's limit at realistic rates is sleep
-granularity, not CPU. `Stats.Record` costs **147 ns/op** under full contention
-(`RollingStats.Record` 223 — see [Rolling window](#rolling-window)).
+granularity, not CPU. `Stats.Record` costs **201 ns/op** under full contention
+(`RollingStats.Record` 256 — see [Rolling window](#rolling-window); `LabeledStats`
+under [Per-endpoint breakdown](#per-endpoint-breakdown)).
 Reproduce with:
 
 ```bash
@@ -335,9 +448,13 @@ go test -run '^$' -bench 'BenchmarkDriverOverhead|BenchmarkStatsRecord' ./...
 
 ## Status
 
-v0.5 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
+v0.7 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
 versions may carry small breaking changes**, always with a migration note in the
 CHANGELOG. Pin an exact version.
+
+Nothing has been removed or changed in meaning since v0.3; v0.4 through v0.7 are
+all additive. The `Driver`, `Result` and `Snapshot` a v0.4 consumer compiled
+against behave identically today.
 
 ## Used by
 

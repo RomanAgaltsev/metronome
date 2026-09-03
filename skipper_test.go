@@ -264,6 +264,49 @@ func TestAfterZeroAdmitsEveryPlaceableResult(t *testing.T) {
 	}
 }
 
+func TestAfterZeroDoesNotAnchorOnTheFirstResultSeen(t *testing.T) {
+	// A zero window has no boundary, so there is nothing to anchor. Anchoring
+	// anyway would put the origin at the first Result *seen*, and out-of-order
+	// arrival is routine — so every later Result scheduled before it would be
+	// excluded from a warmup the caller never asked for. After(0) is what a
+	// --warmup flag left unset produces, and it must mean exactly nothing.
+	base := time.Unix(0, 0)
+	stub := &recordingStub{}
+	s := After(0, stub)
+
+	at := func(d time.Duration) Result {
+		return Result{Scheduled: base.Add(d), Start: base.Add(d), Latency: time.Millisecond}
+	}
+
+	s.Record(at(10100 * time.Millisecond)) // arrives first
+	s.Record(at(9900 * time.Millisecond))  // scheduled earlier, arrives later
+	s.Record(at(10200 * time.Millisecond))
+
+	if got := len(stub.got); got != 3 {
+		t.Fatalf("recorded %d Results, want 3 — After(0) must admit every placeable Result", got)
+	}
+	if got := s.Skipped(); got != 0 {
+		t.Fatalf("Skipped()=%d want 0", got)
+	}
+}
+
+func TestAfterZeroStillSkipsUnplaceableResults(t *testing.T) {
+	// The placement rule stays uniform at d == 0: a Result carrying neither
+	// stamp cannot be put on the timeline, so admitting it would be a guess.
+	stub := &recordingStub{}
+	s := After(0, stub)
+
+	s.Record(Result{Latency: time.Millisecond}) // no Scheduled, no Start
+	s.Record(Result{Scheduled: time.Unix(0, 0), Start: time.Unix(0, 0), Latency: time.Millisecond})
+
+	if got := len(stub.got); got != 1 {
+		t.Fatalf("recorded %d Results, want 1", got)
+	}
+	if got := s.Skipped(); got != 1 {
+		t.Fatalf("Skipped()=%d want 1", got)
+	}
+}
+
 func TestAfterLongerThanTheRunAdmitsNothing(t *testing.T) {
 	base := time.Unix(0, 0)
 	stub := &recordingStub{}

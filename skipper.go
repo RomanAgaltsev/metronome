@@ -117,6 +117,14 @@ func (t *timeRule) admit(r Result) bool {
 		return false
 	}
 	if !t.anchored {
+		// A zero window has no boundary, so there is nothing to anchor. Anchoring
+		// anyway would invent one at the first Result *seen*, and every later
+		// Result scheduled before it — routine, since Results arrive off a channel
+		// fed by many workers — would then be excluded from a warmup the caller
+		// did not ask for. AfterTime sets from explicitly and never reaches here.
+		if t.d == 0 {
+			return true
+		}
 		t.from = stamp.Add(t.d)
 		t.anchored = true
 	}
@@ -149,7 +157,11 @@ func (t *timeRule) admit(r Result) bool {
 // seen need not be the earliest scheduled. That is negligible against a warmup
 // measured in seconds; use AfterTime when the boundary must be exact.
 //
-// After(0) admits every placeable Result.
+// After(0) admits every placeable Result and never anchors. A zero window has
+// no boundary, so anchoring one on the first Result seen would exclude every
+// later Result that was scheduled before it — a warmup the caller did not ask
+// for. It is the natural value for a --warmup flag left unset, so it means
+// exactly nothing rather than nearly nothing.
 func After(d time.Duration, rec Recorder) *Skipper {
 	if d < 0 {
 		panic("metronome: After d must be >= 0")

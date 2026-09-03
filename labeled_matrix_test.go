@@ -170,6 +170,82 @@ func TestLabeledStatsAcceptsTheEndsOfEveryKnobRange(t *testing.T) {
 	}
 }
 
+// TestLabeledStatsKnobEndsHoldOverRollingChildren runs the same knob ends over
+// R = *RollingStats.
+//
+// The generic parameter is the one thing the *Stats matrix above cannot vary,
+// and the routing, capping and reconciliation must not depend on it: every
+// series here is 3.2 MiB rather than 272 KiB, so the cases are the shapes where
+// the cap and the sentinels interact, not the whole grid. The narrowed
+// histogram range keeps the whole test around 2 MiB.
+func TestLabeledStatsKnobEndsHoldOverRollingChildren(t *testing.T) {
+	base := time.Unix(0, 0)
+
+	// A narrow range and a small ring: the point here is series accounting, not
+	// histogram resolution, and the default would allocate ~3.2 MiB per series.
+	newRolling := func(clock Clock) func() *RollingStats {
+		return func() *RollingStats {
+			return NewRollingStats(Rolling{
+				Window: time.Second, Buckets: 2, Clock: clock,
+				Lo: time.Millisecond, Hi: time.Second, Sigfigs: 1,
+			})
+		}
+	}
+
+	cases := map[string]struct {
+		maxSeries int
+		distinct  int
+		wantLen   int
+	}{
+		"MaxSeries 1": {maxSeries: 1, distinct: 9, wantLen: 2},
+		"MaxSeries larger than the distinct values": {maxSeries: 50, distinct: 3, wantLen: 4},
+		"exactly MaxSeries, plus unlabeled":         {maxSeries: 3, distinct: 3, wantLen: 4},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			clock := NewManualClock(base)
+			ls := NewLabeledStats(Labeled[*RollingStats]{
+				Key: "endpoint", New: newRolling(clock), MaxSeries: tc.maxSeries,
+			})
+
+			for i := range 100 {
+				value := string(rune('a' + i%tc.distinct))
+				if i%11 == 0 {
+					value = "" // some unlabeled traffic in every case
+				}
+				ls.Record(labelled("endpoint", value, time.Duration(i%20+1)*time.Millisecond,
+					base.Add(time.Duration(i)*time.Millisecond)))
+			}
+
+			if got := ls.Len(); got != tc.wantLen {
+				t.Fatalf("Len()=%d want %d, series=%v", got, tc.wantLen, ls.Series())
+			}
+			if got, want := ls.Snapshot().Count, int64(100); got != want {
+				t.Fatalf("total Count=%d want %d", got, want)
+			}
+
+			var sum int64
+			for _, child := range ls.Series() {
+				sum += child.Snapshot().Count
+				// The typed access the generic parameter exists for: no assertion.
+				if w := child.Window(); w.Window <= 0 {
+					t.Fatalf("Window() reported Window=%v, want a positive covered duration", w.Window)
+				}
+			}
+			if sum != ls.Snapshot().Count {
+				t.Fatalf("series=%d total=%d", sum, ls.Snapshot().Count)
+			}
+
+			// Bytes reaches through the optional interface to rolling children
+			// exactly as it does to flat ones.
+			if got, want := ls.Bytes(), int64(tc.wantLen+1)*ls.Total().Bytes(); got != want {
+				t.Fatalf("Bytes()=%d want %d (%d series + the total)", got, want, tc.wantLen)
+			}
+		})
+	}
+}
+
 // countingRecorder is a Recorder that reports no size, so LabeledStats.Bytes
 // must say so rather than guess.
 type countingRecorder struct{ n int64 }

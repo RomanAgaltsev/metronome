@@ -96,6 +96,37 @@ func TestMultiPanicsWithNoRecorders(t *testing.T) {
 	Multi()
 }
 
+func TestMultiPanicsOnANilRecorder(t *testing.T) {
+	// At construction, not at the first Record — which on a live run would be
+	// after the Driver had already started generating load.
+	cases := map[string][]Recorder{
+		"only":   {nil},
+		"first":  {nil, &recordingStub{}},
+		"second": {&recordingStub{}, nil},
+	}
+	for name, recs := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("Multi with a nil Recorder did not panic")
+				}
+			}()
+			Multi(recs...)
+		})
+	}
+}
+
+func TestDrainPanicsOnANilRecorder(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Drain with a nil Recorder did not panic")
+		}
+	}()
+	ch := make(chan Result)
+	close(ch)
+	Drain(ch, nil)
+}
+
 func TestMultiIgnoresLaterMutationOfTheCallersSlice(t *testing.T) {
 	a, b := &recordingStub{}, &recordingStub{}
 	recs := []Recorder{a, b}

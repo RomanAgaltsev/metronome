@@ -45,6 +45,12 @@ type Labeled[R Recorder] struct {
 	// to carry a request ID rather than a route name would otherwise allocate a
 	// child per request; past the cap those Results land in the Overflow series
 	// instead, so a mislabelled run loses reporting detail rather than memory.
+	//
+	// The Unlabeled series counts against the cap, because it is created by the
+	// same lazy path a real value takes. A run at the default that carries any
+	// unlabeled traffic therefore breaks down 99 label values, not 100. The
+	// Overflow series does not count against it — it is where the cap sends
+	// things, so charging the cap for it would be circular.
 	MaxSeries int
 
 	// Overflow names the series absorbing label values past MaxSeries.
@@ -226,6 +232,15 @@ func (ls *LabeledStats[R]) child(v string) R {
 
 // Record adds r to the total and to exactly one series. It is safe to call
 // concurrently.
+//
+// Every Result lands in the total and in exactly one series, so once recording
+// has stopped the sum of the series' Counts equals the total's. That reconciles
+// at rest, not at every instant: the two child calls below are made in sequence
+// and outside this LabeledStats' lock, so a reader polling a live run can catch
+// a Result counted in the total and not yet in its series, or a series that
+// exists with a Count of zero. Serialising them would make the invariant hold
+// continuously at the cost of funnelling every series through one mutex, which
+// is the contention this type is shaped to avoid.
 func (ls *LabeledStats[R]) Record(r Result) {
 	c := ls.child(ls.label(r))
 

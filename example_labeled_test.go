@@ -43,12 +43,28 @@ func ExampleLabeledStats() {
 	}
 	sort.Strings(names)
 
-	fmt.Println("total:", stats.Snapshot().Count)
-	for _, name := range names {
-		fmt.Printf("%s p50 >= 5ms: %v\n", name, stats.Series()[name].Snapshot().P50 >= 5*time.Millisecond)
-	}
+	series := stats.Series()
+	list, search := series["list"].Snapshot(), series["search"].Snapshot()
+	total := stats.Snapshot()
+
+	fmt.Println("series:", names)
+	fmt.Println("total count:", total.Count)
+
+	// The motivating defect, shown rather than described. list is three
+	// quarters of the traffic and sixteen times faster, but the aggregate P99
+	// is search's alone — so the one number a flat Stats reports describes a
+	// quarter of the requests and hides the rest.
+	fmt.Println("list   p99:", list.P99.Round(time.Millisecond))
+	fmt.Println("search p99:", search.P99.Round(time.Millisecond))
+	fmt.Println("total  p99:", total.P99.Round(time.Millisecond))
+
+	// And the series always reconcile with the total.
+	fmt.Println("series sum == total:", list.Count+search.Count == total.Count)
 	// Output:
-	// total: 400
-	// list p50 >= 5ms: true
-	// search p50 >= 5ms: true
+	// series: [list search]
+	// total count: 400
+	// list   p99: 5ms
+	// search p99: 80ms
+	// total  p99: 80ms
+	// series sum == total: true
 }
