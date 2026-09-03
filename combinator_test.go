@@ -114,3 +114,82 @@ type recorderFunc func(Result)
 
 func (f recorderFunc) Record(r Result)    { f(r) }
 func (f recorderFunc) Snapshot() Snapshot { return Snapshot{} }
+
+func TestFilterRecordsOnlyWhatThePredicateKeeps(t *testing.T) {
+	stub := &recordingStub{}
+	f := Filter(func(r Result) bool { return r.Code == "500" }, stub)
+
+	f.Record(Result{Code: "200"})
+	f.Record(Result{Code: "500"})
+	f.Record(Result{Code: "500"})
+	f.Record(Result{Code: "404"})
+
+	if got := len(stub.got); got != 2 {
+		t.Fatalf("kept %d Results, want 2", got)
+	}
+}
+
+func TestFilterHandlesAlwaysTrueAndAlwaysFalse(t *testing.T) {
+	all := &recordingStub{}
+	none := &recordingStub{}
+
+	fAll := Filter(func(Result) bool { return true }, all)
+	fNone := Filter(func(Result) bool { return false }, none)
+	for range 7 {
+		fAll.Record(Result{})
+		fNone.Record(Result{})
+	}
+
+	if got := len(all.got); got != 7 {
+		t.Fatalf("always-true kept %d, want 7", got)
+	}
+	if got := len(none.got); got != 0 {
+		t.Fatalf("always-false kept %d, want 0", got)
+	}
+}
+
+func TestFilterSupportsAStatefulPredicate(t *testing.T) {
+	stub := &recordingStub{}
+	seen := 0
+	f := Filter(func(Result) bool {
+		seen++
+		return seen%2 == 0
+	}, stub)
+
+	for range 10 {
+		f.Record(Result{})
+	}
+
+	if got := len(stub.got); got != 5 {
+		t.Fatalf("kept %d Results, want 5", got)
+	}
+}
+
+func TestFilterSnapshotDelegates(t *testing.T) {
+	stub := &recordingStub{}
+	f := Filter(func(Result) bool { return true }, stub)
+	f.Record(Result{})
+
+	if got := f.Snapshot().Count; got != 1 {
+		t.Fatalf("Snapshot Count=%d want 1", got)
+	}
+}
+
+func TestFilterPanicsOnNilArguments(t *testing.T) {
+	t.Run("nil keep", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Filter did not panic on a nil predicate")
+			}
+		}()
+		Filter(nil, &recordingStub{})
+	})
+	t.Run("nil recorder", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Filter did not panic on a nil Recorder")
+			}
+		}()
+		Filter(func(Result) bool { return true }, nil)
+	})
+}

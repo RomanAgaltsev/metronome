@@ -46,3 +46,34 @@ func (m *multi) Record(r Result) {
 }
 
 func (m *multi) Snapshot() Snapshot { return m.recs[0].Snapshot() }
+
+// Filter returns a Recorder that records only the Results for which keep
+// reports true. It panics if keep or rec is nil.
+//
+// keep is called once per Result, on the calling goroutine, and may keep state
+// — the warmup skippers are exactly this with a stateful predicate. It must not
+// mutate the Result.
+//
+// Snapshot delegates to rec, so the filtered aggregate reads normally.
+func Filter(keep func(Result) bool, rec Recorder) Recorder {
+	if keep == nil {
+		panic("metronome: Filter keep must not be nil")
+	}
+	if rec == nil {
+		panic("metronome: Filter rec must not be nil")
+	}
+	return &filter{keep: keep, rec: rec}
+}
+
+type filter struct {
+	keep func(Result) bool
+	rec  Recorder
+}
+
+func (f *filter) Record(r Result) {
+	if f.keep(r) {
+		f.rec.Record(r)
+	}
+}
+
+func (f *filter) Snapshot() Snapshot { return f.rec.Snapshot() }
