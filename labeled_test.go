@@ -128,8 +128,8 @@ func TestLabeledStatsSeriesAlwaysReconcileWithTheTotal(t *testing.T) {
 
 	for i := range 100 {
 		var value string
-		switch {
-		case i%5 == 0:
+		switch i % 5 {
+		case 0:
 			value = "" // unlabeled
 		default:
 			value = string(rune('a' + i%9)) // nine distinct values, cap of three

@@ -44,6 +44,16 @@
 // target that stops answering never moves any cumulative number at all, because
 // there are no new Results to move it.
 //
+// // Recorder names what Stats and RollingStats both do. LabeledStats splits a
+// Result stream on one Result.Labels key into a child Recorder per value plus a
+// total, so a Mix of endpoints reports per-endpoint percentiles instead of one
+// aggregate that describes no endpoint. It is generic over the child, so
+// LabeledStats[*RollingStats] gives a trailing window per endpoint.
+//
+// A series is a whole aggregate, so cardinality is capped: past MaxSeries
+// distinct values, Results land in a single overflow series. Price a
+// configuration with Bytes before paying for it.
+//
 // # Diagnosing a run that fell short
 //
 // [Snapshot.Saturated] counts units the target had no free worker for;
