@@ -54,6 +54,13 @@
 // distinct values, Results land in a single overflow series. Price a
 // configuration with Bytes before paying for it.
 //
+// Recorders compose. Multi fans one Result to several of them, Filter keeps
+// only the Results a predicate accepts, and After, AfterTime and AfterN
+// exclude a warmup period so that cold connection pools and unwarmed targets
+// stay out of a threshold. Drain is the canonical loop over a Driver's result
+// channel. Each is a pure Recorder transform: none owns a goroutine, a channel
+// or a clock.
+//
 // # Diagnosing a run that fell short
 //
 // [Snapshot.Saturated] counts units the target had no free worker for;

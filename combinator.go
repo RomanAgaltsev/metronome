@@ -39,12 +39,14 @@ func Multi(recs ...Recorder) Recorder {
 
 type multi struct{ recs []Recorder }
 
+// Record -
 func (m *multi) Record(r Result) {
 	for _, rec := range m.recs {
 		rec.Record(r)
 	}
 }
 
+// Snapshot -
 func (m *multi) Snapshot() Snapshot { return m.recs[0].Snapshot() }
 
 // Filter returns a Recorder that records only the Results for which keep
@@ -70,12 +72,14 @@ type filter struct {
 	rec  Recorder
 }
 
+// Record -
 func (f *filter) Record(r Result) {
 	if f.keep(r) {
 		f.rec.Record(r)
 	}
 }
 
+// Snapshot -
 func (f *filter) Snapshot() Snapshot { return f.rec.Snapshot() }
 
 // Drain records every Result from ch into rec until ch is closed. It is the
