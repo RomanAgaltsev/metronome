@@ -435,3 +435,106 @@ func TestStatsResetThenRecordIsIndependentOfHistory(t *testing.T) {
 		t.Fatalf("Max=%v want 1ms after reset", snap.Max)
 	}
 }
+
+func TestStatsExportedMergeEqualsOneStatsFedTheSameResults(t *testing.T) {
+	results := buildMergeResults()
+
+	whole := NewStats()
+	for _, r := range results {
+		whole.Record(r)
+	}
+
+	parts := []*Stats{NewStats(), NewStats(), NewStats()}
+	for i, r := range results {
+		parts[i%3].Record(r)
+	}
+	merged := NewStats()
+	for _, p := range parts {
+		merged.Merge(p)
+	}
+
+	want, got := whole.Snapshot(), merged.Snapshot()
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("merged snapshot differs\nwant %+v\n got %+v", want, got)
+	}
+}
+
+func TestStatsMergePanicsOnAMismatchedRange(t *testing.T) {
+	for name, src := range map[string]*Stats{
+		"lo":      NewStatsRange(2*time.Microsecond, time.Minute, 3),
+		"hi":      NewStatsRange(time.Microsecond, 2*time.Minute, 3),
+		"sigfigs": NewStatsRange(time.Microsecond, time.Minute, 2),
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("Merge did not panic on a mismatched range")
+				}
+			}()
+			NewStats().Merge(src)
+		})
+	}
+}
+
+func TestStatsMergePanicsOnSelfMerge(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Merge did not panic merging a Stats into itself")
+		}
+	}()
+	s := NewStats()
+	s.Merge(s)
+}
+
+func TestStatsMergeInBothDirectionsDoesNotDeadlock(t *testing.T) {
+	// Address-ordered locking is what makes this terminate. Without it the two
+	// goroutines take a.mu/b.mu in opposite orders and the test hangs.
+	a, b := NewStats(), NewStats()
+	for i, r := range buildMergeResults() {
+		if i%2 == 0 {
+			a.Record(r)
+		} else {
+			b.Record(r)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 200 {
+			a.Merge(b)
+		}
+	}()
+	for range 200 {
+		b.Merge(a)
+	}
+	<-done
+}
+
+func TestStatsMergeOfAnEmptyStatsIsANoOp(t *testing.T) {
+	s := NewStats()
+	for _, r := range buildMergeResults() {
+		s.Record(r)
+	}
+	want := s.Snapshot()
+
+	s.Merge(NewStats())
+
+	if got := s.Snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("merging an empty Stats changed the aggregate\nwant %+v\n got %+v", want, got)
+	}
+}
+
+func TestStatsMergeIntoAnEmptyStatsIsACopy(t *testing.T) {
+	src := NewStats()
+	for _, r := range buildMergeResults() {
+		src.Record(r)
+	}
+
+	dst := NewStats()
+	dst.Merge(src)
+
+	if got, want := dst.Snapshot(), src.Snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("merge into empty is not a copy\nwant %+v\n got %+v", want, got)
+	}
+}

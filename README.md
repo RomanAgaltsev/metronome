@@ -262,6 +262,24 @@ rather than an oversight: it is demand-gated on the roadmap, so open an issue if
 you want a fine-grained window and it becomes a decision rather than a
 rediscovery.
 
+### Per-endpoint breakdown
+
+A `Mix` of ten endpoints reports one P99 that no endpoint exhibits. `LabeledStats` splits the
+stream on one `Result.Labels` key:
+
+```go
+stats := metronome.NewLabeledStats(metronome.Labeled[*metronome.Stats]{
+    Key: "endpoint",
+    New: metronome.NewStats,
+})
+for r := range driver.Run(ctx) {
+    stats.Record(r)
+}
+
+stats.Snapshot()                      // the total — same as a plain Stats
+stats.Series()["search"].Snapshot()   // just that endpoint
+
+
 ### Measured accuracy
 
 Measured on an AMD Ryzen 5 3600 (6 cores / 12 threads), Windows 11, Go 1.26.6,

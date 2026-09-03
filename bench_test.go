@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -197,5 +198,30 @@ func BenchmarkRollingStatsWindowStalled(b *testing.B) {
 
 	for b.Loop() {
 		_ = rs.Window()
+	}
+}
+
+// BenchmarkLabeledRecord measures the cost of a breakdown over a flat Stats.
+// Compare against BenchmarkStatsRecord: the difference is one extra child
+// Record plus the RWMutex lookup.
+func BenchmarkLabeledRecord(b *testing.B) {
+	for _, series := range []int{1, 10, 100} {
+		b.Run(fmt.Sprintf("series=%d", series), func(b *testing.B) {
+			ls := NewLabeledStats(Labeled[*Stats]{Key: "endpoint", New: NewStats, MaxSeries: 1000})
+			base := time.Unix(0, 0)
+
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				i := 0
+				for pb.Next() {
+					i++
+					ls.Record(Result{
+						Start:   base.Add(time.Duration(i) * time.Microsecond),
+						Latency: time.Millisecond,
+						Labels:  map[string]string{"endpoint": strconv.Itoa(i % series)},
+					})
+				}
+			})
+		})
 	}
 }
