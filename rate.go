@@ -60,6 +60,40 @@ func (p Phased) Rate(elapsed time.Duration) float64 {
 	return p.Phases[len(p.Phases)-1].TargetRPS
 }
 
+// PhaseEnd reports the elapsed time at which phase i ends: the sum of the
+// durations of phases 0 through i. It panics if i is out of range.
+//
+// Pair it with After to keep one source of truth for a warmup boundary:
+//
+//	measured := metronome.After(rate.PhaseEnd(0), stats)
+//
+// rather than repeating the first phase's duration, where the two can drift
+// and only one of them fails loudly.
+func (p Phased) PhaseEnd(i int) time.Duration {
+	if i < 0 || i >= len(p.Phases) {
+		panic("metronome: Phased.PhaseEnd index out of range")
+	}
+	var acc time.Duration
+	for _, ph := range p.Phases[:i+1] {
+		acc += ph.Duration
+	}
+	return acc
+}
+
+// Duration reports the elapsed time at which the last phase ends, or zero when
+// there are no phases.
+//
+// Rate holds the last phase's rate past this point, so this is a measurement
+// boundary rather than a stop condition — a Driver runs until its context ends
+// or MaxRequests is reached, whatever the controller says.
+func (p Phased) Duration() time.Duration {
+	var acc time.Duration
+	for _, ph := range p.Phases {
+		acc += ph.Duration
+	}
+	return acc
+}
+
 // Adaptive is a RateController whose rate is set externally.
 // Safe for concurrent SetRate/Rate.
 type Adaptive struct {
