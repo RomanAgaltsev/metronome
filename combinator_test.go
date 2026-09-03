@@ -1,6 +1,7 @@
 package metronome
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -192,4 +193,46 @@ func TestFilterPanicsOnNilArguments(t *testing.T) {
 		}()
 		Filter(func(Result) bool { return true }, nil)
 	})
+}
+
+func TestDrainRecordsEverythingUntilTheChannelCloses(t *testing.T) {
+	ch := make(chan Result, 5)
+	for i := range 5 {
+		ch <- Result{Start: time.Unix(0, 0).Add(time.Duration(i) * time.Millisecond), Latency: time.Millisecond}
+	}
+	close(ch)
+
+	stats := NewStats()
+	Drain(ch, stats)
+
+	if got := stats.Snapshot().Count; got != 5 {
+		t.Fatalf("Count=%d want 5", got)
+	}
+}
+
+func TestDrainReturnsWhenTheDriverIsCancelled(t *testing.T) {
+	// Drain takes no context on purpose: abandoning a live result channel leaks
+	// for the lifetime of the process, so cancellation belongs on the Driver.
+	// goleak (TestMain) is what proves the goroutines actually went.
+	d := Driver{
+		Runner:  RunnerFunc(func(context.Context) Result { return Result{Latency: time.Millisecond} }),
+		Rate:    Constant(10000),
+		Workers: 4,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := d.Run(ctx)
+
+	stats := NewStats()
+	go func() {
+		// Let a few Results flow, then stop the generator.
+		for range 10 {
+			<-ch
+		}
+		cancel()
+	}()
+	Drain(ch, stats)
+
+	if got := stats.Snapshot().Count; got < 0 {
+		t.Fatalf("Count=%d", got)
+	}
 }

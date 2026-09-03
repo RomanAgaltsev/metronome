@@ -77,3 +77,19 @@ func (f *filter) Record(r Result) {
 }
 
 func (f *filter) Snapshot() Snapshot { return f.rec.Snapshot() }
+
+// Drain records every Result from ch into rec until ch is closed. It is the
+// canonical consumption loop, named so that consumers stop rewriting the one
+// place where getting it wrong leaks goroutines.
+//
+// It deliberately takes no context. The Driver's contract on its result channel
+// is blunt — abandoning a live one leaks the units still in flight for the
+// lifetime of the process — so a Drain that returned early on cancellation
+// would be a leak generator in the shape of good practice. Cancel the Driver's
+// context instead: it stops, closes the channel, and this returns because the
+// range ended.
+func Drain(ch <-chan Result, rec Recorder) {
+	for r := range ch {
+		rec.Record(r)
+	}
+}
