@@ -101,6 +101,13 @@ the old flat cost returns.
   latencies inside a single millisecond holds about a thousand distinct values and
   never promotes.
 
+## [0.9.0](https://github.com/RomanAgaltsev/metronome/compare/v0.8.0...v0.9.0) (2026-09-13)
+
+
+### Features
+
+* sparse bucket storage for RollingStats ([#36](https://github.com/RomanAgaltsev/metronome/issues/36)) ([ab6634b](https://github.com/RomanAgaltsev/metronome/commit/ab6634bb02b198483f9caa6795080e4551525f2e))
+
 ## [0.8.0](https://github.com/RomanAgaltsev/metronome/compare/v0.7.0...v0.8.0) (2026-09-13)
 
 
