@@ -69,4 +69,16 @@
 // [Snapshot.MaxScheduleLag] is how far the generator itself fell behind. Saturation
 // with no lag means the target could not keep up. Lag with no saturation means
 // metronome could not — lower the rate, or use ClosedLoop.
+//
+// # Composing a load shape
+//
+// A RateController is a pure function of elapsed time, and four of them
+// compose into the rest: Sine for a smooth periodic curve, and Sum, Repeat and
+// Scale over any controller. A spike on a baseline is a constant plus a
+// repeating phase table, which is why there is no Burst type.
+//
+// The Driver samples the controller ten times a second, so shape features
+// shorter than about 200ms do not exist and a cycle near that length aliases.
+// Keep periods and spikes at a second or more.
+
 package metronome
