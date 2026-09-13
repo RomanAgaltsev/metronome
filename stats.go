@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/HdrHistogram/hdrhistogram-go"
 	hdr "github.com/HdrHistogram/hdrhistogram-go"
 )
 
@@ -339,4 +340,152 @@ func (s *Stats) Merge(src *Stats) {
 	defer second.mu.Unlock()
 
 	s.mergeLocked(src)
+}
+
+// sparseBytesPerEntry is the amortised cost of one map[int64]int64 entry: an
+// 8-byte key, an 8-byte value, and the runtime's per-bucket overhead and load
+// factor. It sets where sparse stops being cheaper than the dense array, so it
+// is deliberately conservative — over-estimating promotes slightly early, which
+// costs memory we were going to spend anyway.
+const sparseBytesPerEntry = 50
+
+// latencyHist holds a Stats' two latency distributions in one of two modes.
+//
+// Dense is the HDR pair and is what every directly-constructed Stats uses.
+// Sparse is a value-to-count map per distribution, and exists because a
+// RollingStats ring bucket is sized by its configuration rather than by what it
+// holds: at 1,000 buckets a bucket may carry ten Results in a 136 KiB array.
+//
+// A sparse store supports exactly what a ring bucket needs — record, merge into
+// a dense target, reset and bytes. It has no query surface, because nothing
+// reads a bucket's percentiles: Window merges the live buckets into scratch and
+// reads the snapshot off scratch.
+type latencyHist struct {
+	lo, hi    time.Duration
+	sigfigs   int
+	countsLen int64
+
+	// dense mode; nil while sparse
+	hist      *hdrhistogram.Histogram
+	corrected *hdrhistogram.Histogram
+
+	// sparse mode; nil once promoted
+	sparseRaw  map[int64]int64
+	sparseCorr map[int64]int64
+
+	// promoteAt is the distinct-value count at which sparse stops being
+	// cheaper. Computed from the configuration so an unusual range or Sigfigs
+	// gets its own break-even rather than one tuned for the default.
+	promoteAt int
+}
+
+func newLatencyHist(lo, hi time.Duration, sigfigs int, sparse bool) *latencyHist {
+	counts := histogramCounts(lo, hi, sigfigs)
+	lh := &latencyHist{
+		lo:        lo,
+		hi:        hi,
+		sigfigs:   sigfigs,
+		countsLen: counts,
+		promoteAt: int(counts * bytesPerCount / sparseBytesPerEntry),
+	}
+	if sparse {
+		lh.sparseRaw = make(map[int64]int64)
+		lh.sparseCorr = make(map[int64]int64)
+		return lh
+	}
+	lh.allocDense()
+	return lh
+}
+
+func (lh *latencyHist) allocDense() {
+	lh.hist = hdrhistogram.New(int64(lh.lo), int64(lh.hi), lh.sigfigs)
+	lh.corrected = hdrhistogram.New(int64(lh.lo), int64(lh.hi), lh.sigfigs)
+}
+
+func (lh *latencyHist) isSparse() bool { return lh.sparseRaw != nil }
+
+// promote allocates the dense pair, replays the sparse pairs into it, and drops
+// the maps. It runs at most once per latencyHist: a store dense enough to lose
+// the advantage becomes dense and stays that way.
+func (lh *latencyHist) promote() {
+	raw, corr := lh.sparseRaw, lh.sparseCorr
+	lh.sparseRaw, lh.sparseCorr = nil, nil
+	lh.allocDense()
+	for v, n := range raw {
+		_ = lh.hist.RecordValues(v, n)
+	}
+	for v, n := range corr {
+		_ = lh.corrected.RecordValues(v, n)
+	}
+}
+
+// record adds one observation to each distribution and reports whether either
+// fell outside the histogram range. Clamping is detected identically in both
+// modes, because a consumer reads Clamped to know its percentiles understate
+// reality.
+func (lh *latencyHist) record(raw, corrected int64) (clampedRaw, clampedCorrected bool) {
+	clampedRaw = raw < int64(lh.lo) || raw > int64(lh.hi)
+	clampedCorrected = corrected < int64(lh.lo) || corrected > int64(lh.hi)
+
+	if lh.isSparse() {
+		lh.sparseRaw[clampValue(raw, lh.lo, lh.hi)]++
+		lh.sparseCorr[clampValue(corrected, lh.lo, lh.hi)]++
+		if len(lh.sparseRaw) > lh.promoteAt || len(lh.sparseCorr) > lh.promoteAt {
+			lh.promote()
+		}
+		return clampedRaw, clampedCorrected
+	}
+
+	_ = lh.hist.RecordValue(clampValue(raw, lh.lo, lh.hi))
+	_ = lh.corrected.RecordValue(clampValue(corrected, lh.lo, lh.hi))
+	return clampedRaw, clampedCorrected
+}
+
+// clampValue pins v into [lo, hi] so a value outside the range still lands in
+// the distribution at its nearest representable point, which is what the dense
+// path already did.
+func clampValue(v int64, lo, hi time.Duration) int64 {
+	return min(max(v, int64(lo)), int64(hi))
+}
+
+// mergeInto folds this store into dst, which must be dense. scratch is built by
+// NewStatsRange and is the only merge target, so there is no sparse-into-sparse
+// case and none is written.
+func (lh *latencyHist) mergeInto(dst *latencyHist) {
+	if dst.isSparse() {
+		panic("metronome: latencyHist merge target must be dense")
+	}
+	if lh.isSparse() {
+		for v, n := range lh.sparseRaw {
+			_ = dst.hist.RecordValues(v, n)
+		}
+		for v, n := range lh.sparseCorr {
+			_ = dst.corrected.RecordValues(v, n)
+		}
+		return
+	}
+	dst.hist.Merge(lh.hist)
+	dst.corrected.Merge(lh.corrected)
+}
+
+// reset empties the store and keeps its mode. A promoted store stays dense,
+// matching what Stats.reset already did by calling hist.Reset rather than
+// reallocating — and meaning a burst's cost converges on the old behaviour
+// rather than thrashing at the break-even boundary.
+func (lh *latencyHist) reset() {
+	if lh.isSparse() {
+		clear(lh.sparseRaw)
+		clear(lh.sparseCorr)
+		return
+	}
+	lh.hist.Reset()
+	lh.corrected.Reset()
+}
+
+// bytes reports what this store currently holds.
+func (lh *latencyHist) bytes() int64 {
+	if lh.isSparse() {
+		return int64(len(lh.sparseRaw)+len(lh.sparseCorr)) * sparseBytesPerEntry
+	}
+	return lh.countsLen * bytesPerCount * histogramsPerStats
 }

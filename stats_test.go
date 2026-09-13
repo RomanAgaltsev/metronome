@@ -538,3 +538,83 @@ func TestStatsMergeIntoAnEmptyStatsIsACopy(t *testing.T) {
 		t.Fatalf("merge into empty is not a copy\nwant %+v\n got %+v", want, got)
 	}
 }
+
+func TestLatencyHistSparseStaysSparseBelowThreshold(t *testing.T) {
+	lh := newLatencyHist(time.Microsecond, time.Minute, 3, true)
+	if !lh.isSparse() {
+		t.Fatal("newLatencyHist(sparse=true) did not start sparse")
+	}
+	// A handful of distinct values must not promote it.
+	for i := range 50 {
+		lh.record(int64(i+1)*1000, int64(i+1)*1000)
+	}
+	if !lh.isSparse() {
+		t.Error("promoted after 50 distinct values, expected to stay sparse")
+	}
+}
+
+func TestLatencyHistPromotesAtThreshold(t *testing.T) {
+	lh := newLatencyHist(time.Microsecond, time.Minute, 3, true)
+	// Push well past any plausible break-even for this range.
+	for i := range 100_000 {
+		v := int64(i + 1)
+		lh.record(v, v)
+		if !lh.isSparse() {
+			break
+		}
+	}
+	if lh.isSparse() {
+		t.Error("never promoted after 100k distinct values")
+	}
+}
+
+func TestLatencyHistDenseStartsDense(t *testing.T) {
+	lh := newLatencyHist(time.Microsecond, time.Minute, 3, false)
+	if lh.isSparse() {
+		t.Error("newLatencyHist(sparse=false) started sparse")
+	}
+}
+
+func TestLatencyHistResetKeepsMode(t *testing.T) {
+	lh := newLatencyHist(time.Microsecond, time.Minute, 3, true)
+	for i := range 100_000 {
+		v := int64(i + 1)
+		lh.record(v, v)
+		if !lh.isSparse() {
+			break
+		}
+	}
+	if lh.isSparse() {
+		t.Fatal("setup failed: never promoted")
+	}
+	lh.reset()
+	if lh.isSparse() {
+		t.Error("a promoted latencyHist demoted on reset; it must stay dense")
+	}
+
+	sp := newLatencyHist(time.Microsecond, time.Minute, 3, true)
+	sp.record(1000, 1000)
+	sp.reset()
+	if !sp.isSparse() {
+		t.Error("a sparse latencyHist promoted on reset")
+	}
+}
+
+func TestLatencyHistBytesGrowsWithEntriesThenFlattens(t *testing.T) {
+	lh := newLatencyHist(time.Microsecond, time.Minute, 3, true)
+	empty := lh.bytes()
+	for i := range 100 {
+		v := int64(i + 1)
+		lh.record(v, v)
+	}
+	filled := lh.bytes()
+	if filled <= empty {
+		t.Errorf("sparse bytes did not grow: %d then %d", empty, filled)
+	}
+
+	dense := newLatencyHist(time.Microsecond, time.Minute, 3, false)
+	if lh.bytes() >= dense.bytes() {
+		t.Errorf("100 sparse entries (%d B) should be well under dense (%d B)",
+			lh.bytes(), dense.bytes())
+	}
+}
