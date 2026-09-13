@@ -618,3 +618,50 @@ func TestLatencyHistBytesGrowsWithEntriesThenFlattens(t *testing.T) {
 			lh.bytes(), dense.bytes())
 	}
 }
+
+func TestBucketStatsMatchesDenseStats(t *testing.T) {
+	const lo, hi, sig = time.Microsecond, time.Minute, 3
+
+	sparse := newBucketStats(lo, hi, sig)
+	dense := NewStatsRange(lo, hi, sig)
+
+	base := time.Now()
+	for i := range 200 {
+		r := Result{
+			Start:     base.Add(time.Duration(i) * time.Millisecond),
+			Scheduled: base.Add(time.Duration(i) * time.Millisecond),
+			Latency:   time.Duration(i%50+1) * time.Millisecond,
+		}
+		sparse.Record(r)
+		dense.Record(r)
+	}
+
+	got, want := sparse.Snapshot(), dense.Snapshot()
+	if got.Count != want.Count {
+		t.Errorf("Count = %d, want %d", got.Count, want.Count)
+	}
+	if got.P50 != want.P50 || got.P99 != want.P99 {
+		t.Errorf("percentiles = %v/%v, want %v/%v", got.P50, got.P99, want.P50, want.P99)
+	}
+	if got.Clamped != want.Clamped || got.CorrectedClamped != want.CorrectedClamped {
+		t.Errorf("clamp counters = %d/%d, want %d/%d",
+			got.Clamped, got.CorrectedClamped, want.Clamped, want.CorrectedClamped)
+	}
+}
+
+func TestBucketStatsClampingParity(t *testing.T) {
+	const lo, hi, sig = time.Millisecond, time.Second, 3
+
+	sparse := newBucketStats(lo, hi, sig)
+	dense := NewStatsRange(lo, hi, sig)
+
+	base := time.Now()
+	for _, lat := range []time.Duration{time.Microsecond, time.Hour, 10 * time.Millisecond} {
+		r := Result{Start: base, Scheduled: base, Latency: lat}
+		sparse.Record(r)
+		dense.Record(r)
+	}
+	if got, want := sparse.Snapshot().Clamped, dense.Snapshot().Clamped; got != want {
+		t.Errorf("Clamped = %d, want %d", got, want)
+	}
+}

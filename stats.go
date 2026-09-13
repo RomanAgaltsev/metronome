@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/HdrHistogram/hdrhistogram-go"
 	hdr "github.com/HdrHistogram/hdrhistogram-go"
 )
 
@@ -24,7 +23,7 @@ var statsID atomic.Uint64
 // Stats aggregates Results into percentile Snapshots. Safe for concurrent Record.
 type Stats struct {
 	mu               sync.Mutex
-	hist             *hdr.Histogram
+	lat              *latencyHist
 	count            int64
 	errors           int64
 	saturated        int64
@@ -35,13 +34,8 @@ type Stats struct {
 	maxLag           time.Duration // largest Start-Scheduled, floored at zero
 	bytes            int64
 	codes            map[string]int64
-	corrected        *hdr.Histogram
 	correctedCount   int64
 	correctedClamped int64
-
-	// countsLen is the length of each histogram's counts array, derived at
-	// construction. Immutable, so Bytes needs no lock.
-	countsLen int64
 
 	id uint64 // construction order; see statsID
 }
@@ -70,27 +64,15 @@ func NewStatsRange(lo, hi time.Duration, sigfigs int) *Stats {
 		panic("metronome: NewStatsRange sigfigs must be in [1, 5]")
 	}
 	return &Stats{
-		hist:      hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs),
-		corrected: hdr.New(int64(lo/time.Microsecond), int64(hi/time.Microsecond), sigfigs),
-		codes:     make(map[string]int64),
-		countsLen: histogramCounts(lo, hi, sigfigs),
-		id:        statsID.Add(1),
+		lat:   newLatencyHist(lo, hi, sigfigs, false),
+		codes: make(map[string]int64),
+		id:    statsID.Add(1),
 	}
 }
 
 // clampMicros converts d to whole microseconds inside the histogram's range,
 // reporting whether it had to clamp. Caller holds s.mu.
-func (s *Stats) clampMicros(d time.Duration) (int64, bool) {
-	v := int64(d / time.Microsecond)
-	switch {
-	case v < s.hist.LowestTrackableValue():
-		return s.hist.LowestTrackableValue(), true
-	case v > s.hist.HighestTrackableValue():
-		return s.hist.HighestTrackableValue(), true
-	default:
-		return v, false
-	}
-}
+func (s *Stats) clampMicros(d time.Duration) (int64, bool) { return s.lat.clamp(d) }
 
 // Record adds one Result to the aggregate. It is safe to call concurrently.
 func (s *Stats) Record(r Result) {
@@ -114,8 +96,7 @@ func (s *Stats) Record(r Result) {
 	if clamped {
 		s.clamped++
 	}
-	//nolint:gosec // clampMicros guarantees the value is within the histogram's bounds
-	_ = s.hist.RecordValue(v)
+	s.lat.recordRaw(v)
 
 	// Coordinated-omission correction: a unit that started late was, from the
 	// schedule's point of view, already in flight while it waited. Results
@@ -135,8 +116,7 @@ func (s *Stats) Record(r Result) {
 		if clamped {
 			s.correctedClamped++
 		}
-		//nolint:gosec // clampMicros guarantees the value is within the histogram's bounds
-		_ = s.corrected.RecordValue(cv)
+		s.lat.recordCorrected(cv)
 		s.correctedCount++
 	}
 
@@ -192,14 +172,19 @@ func (s *Stats) snapshot(window time.Duration) Snapshot {
 		errRate = float64(s.errors) / float64(s.count)
 	}
 
+	// A percentile is the one question a sparse store cannot answer as HDR
+	// would, so reading one promotes it. Nothing on the RollingStats path gets
+	// here: Window merges the buckets into a dense scratch and snapshots that.
+	rawHist, corrHist := s.lat.hists()
+
 	us := func(p float64) time.Duration {
-		return time.Duration(s.hist.ValueAtQuantile(p)) * time.Microsecond
+		return time.Duration(rawHist.ValueAtQuantile(p)) * time.Microsecond
 	}
 	corrected := func(p float64) time.Duration {
 		if s.correctedCount == 0 {
 			return 0
 		}
-		return time.Duration(s.corrected.ValueAtQuantile(p)) * time.Microsecond
+		return time.Duration(corrHist.ValueAtQuantile(p)) * time.Microsecond
 	}
 
 	return Snapshot{
@@ -233,8 +218,7 @@ func (s *Stats) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.hist.Reset()
-	s.corrected.Reset()
+	s.lat.reset()
 	s.count, s.errors, s.saturated, s.clamped = 0, 0, 0, 0
 	s.correctedCount, s.correctedClamped = 0, 0
 	s.bytes = 0
@@ -258,11 +242,11 @@ func (s *Stats) merge(src *Stats) {
 // mergeLocked folds src into s. The caller holds exclusive use of s and holds
 // src.mu.
 func (s *Stats) mergeLocked(src *Stats) {
-	// Merge reports values it had to drop for falling outside the destination's
-	// range. Both callers guarantee identical ranges — RollingStats by
-	// construction, Merge by an explicit check — so this is always zero.
-	_ = s.hist.Merge(src.hist)
-	_ = s.corrected.Merge(src.corrected)
+	// Both callers guarantee identical ranges — RollingStats by construction,
+	// Merge by an explicit check — so nothing is ever dropped for falling
+	// outside the destination's. A sparse src folds in as value-count pairs; a
+	// dense one as a histogram merge. The destination is always dense.
+	src.lat.mergeInto(s.lat)
 
 	s.count += src.count
 	s.errors += src.errors
@@ -286,23 +270,24 @@ func (s *Stats) mergeLocked(src *Stats) {
 	}
 }
 
-// Bytes reports the memory this Stats holds for its histograms: two count
-// arrays of int64. The surrounding struct, the codes map and the recorded
+// Bytes reports the memory this Stats holds for its latency distributions: two
+// count arrays of int64. The surrounding struct, the codes map and the recorded
 // Results are not included — the count arrays dominate and are the term that
 // scales with the range and significant figures.
 //
-// It needs no lock: the length is fixed at construction.
-func (s *Stats) Bytes() int64 {
-	return s.countsLen * bytesPerCount * histogramsPerStats
-}
+// Every Stats a caller can construct is dense, so this is fixed at construction
+// and needs no lock. The sparse form exists only inside a RollingStats ring,
+// where RollingStats.Bytes takes the lock and totals the buckets.
+func (s *Stats) Bytes() int64 { return s.lat.bytes() }
 
 // sameRange reports whether s and src record over the same range with the same
 // significant figures. It reads only values fixed at construction, so it needs
-// no lock.
+// no lock — and it reads them off the store's own fields rather than off a
+// histogram, which a sparse store does not have until it promotes.
 func (s *Stats) sameRange(src *Stats) bool {
-	return s.hist.LowestTrackableValue() == src.hist.LowestTrackableValue() &&
-		s.hist.HighestTrackableValue() == src.hist.HighestTrackableValue() &&
-		s.hist.SignificantFigures() == src.hist.SignificantFigures()
+	return s.lat.loMicros == src.lat.loMicros &&
+		s.lat.hiMicros == src.lat.hiMicros &&
+		s.lat.sigfigs == src.lat.sigfigs
 }
 
 // Merge folds src into s, so that s reports what it would have reported had it
@@ -356,34 +341,44 @@ const sparseBytesPerEntry = 50
 // RollingStats ring bucket is sized by its configuration rather than by what it
 // holds: at 1,000 buckets a bucket may carry ten Results in a 136 KiB array.
 //
-// A sparse store supports exactly what a ring bucket needs — record, merge into
-// a dense target, reset and bytes. It has no query surface, because nothing
-// reads a bucket's percentiles: Window merges the live buckets into scratch and
-// reads the snapshot off scratch.
+// A sparse store supports what a ring bucket needs — record, merge into a dense
+// target, reset and bytes — and promotes itself if anything asks it a question
+// it cannot answer sparsely. Nothing on the ring path does: Window merges the
+// live buckets into scratch and reads the snapshot off scratch.
+//
+// Every value it holds is whole microseconds, already clamped into
+// [loMicros, hiMicros]. That is the unit the HDR pair is built in, so the two
+// modes index the same distribution and a promotion cannot shift a percentile.
 type latencyHist struct {
-	lo, hi    time.Duration
-	sigfigs   int
-	countsLen int64
+	loMicros, hiMicros int64
+	sigfigs            int
+	countsLen          int64
 
 	// dense mode; nil while sparse
-	hist      *hdrhistogram.Histogram
-	corrected *hdrhistogram.Histogram
+	hist      *hdr.Histogram
+	corrected *hdr.Histogram
 
 	// sparse mode; nil once promoted
 	sparseRaw  map[int64]int64
 	sparseCorr map[int64]int64
 
-	// promoteAt is the distinct-value count at which sparse stops being
+	// promoteAt is the distinct-value count per map at which sparse stops being
 	// cheaper. Computed from the configuration so an unusual range or Sigfigs
 	// gets its own break-even rather than one tuned for the default.
 	promoteAt int
 }
 
+// newLatencyHist builds a store over [lo, hi] at sigfigs significant digits.
+//
+// The microsecond bounds are derived exactly as NewStatsRange derives them for
+// hdr.New, including New's own flooring of a sub-microsecond lo at 1, so that
+// LowestTrackableValue and HighestTrackableValue agree with loMicros and
+// hiMicros in either mode. Clamping parity depends on that and nothing else.
 func newLatencyHist(lo, hi time.Duration, sigfigs int, sparse bool) *latencyHist {
 	counts := histogramCounts(lo, hi, sigfigs)
 	lh := &latencyHist{
-		lo:        lo,
-		hi:        hi,
+		loMicros:  max(int64(lo/time.Microsecond), 1),
+		hiMicros:  int64(hi / time.Microsecond),
 		sigfigs:   sigfigs,
 		countsLen: counts,
 		promoteAt: int(counts * bytesPerCount / sparseBytesPerEntry),
@@ -398,8 +393,8 @@ func newLatencyHist(lo, hi time.Duration, sigfigs int, sparse bool) *latencyHist
 }
 
 func (lh *latencyHist) allocDense() {
-	lh.hist = hdrhistogram.New(int64(lh.lo), int64(lh.hi), lh.sigfigs)
-	lh.corrected = hdrhistogram.New(int64(lh.lo), int64(lh.hi), lh.sigfigs)
+	lh.hist = hdr.New(lh.loMicros, lh.hiMicros, lh.sigfigs)
+	lh.corrected = hdr.New(lh.loMicros, lh.hiMicros, lh.sigfigs)
 }
 
 func (lh *latencyHist) isSparse() bool { return lh.sparseRaw != nil }
@@ -419,33 +414,77 @@ func (lh *latencyHist) promote() {
 	}
 }
 
-// record adds one observation to each distribution and reports whether either
-// fell outside the histogram range. Clamping is detected identically in both
-// modes, because a consumer reads Clamped to know its percentiles understate
-// reality.
-func (lh *latencyHist) record(raw, corrected int64) (clampedRaw, clampedCorrected bool) {
-	clampedRaw = raw < int64(lh.lo) || raw > int64(lh.hi)
-	clampedCorrected = corrected < int64(lh.lo) || corrected > int64(lh.hi)
-
-	if lh.isSparse() {
-		lh.sparseRaw[clampValue(raw, lh.lo, lh.hi)]++
-		lh.sparseCorr[clampValue(corrected, lh.lo, lh.hi)]++
-		if len(lh.sparseRaw) > lh.promoteAt || len(lh.sparseCorr) > lh.promoteAt {
-			lh.promote()
-		}
-		return clampedRaw, clampedCorrected
+// clamp pins d into the histogram's range in whole microseconds, reporting
+// whether it had to. It is the sparse path's clamping as much as the dense
+// one's: a consumer reads Snapshot.Clamped to know its percentiles understate
+// reality, so the two modes must agree on it exactly.
+func (lh *latencyHist) clamp(d time.Duration) (int64, bool) {
+	v := int64(d / time.Microsecond)
+	switch {
+	case v < lh.loMicros:
+		return lh.loMicros, true
+	case v > lh.hiMicros:
+		return lh.hiMicros, true
+	default:
+		return v, false
 	}
-
-	_ = lh.hist.RecordValue(clampValue(raw, lh.lo, lh.hi))
-	_ = lh.corrected.RecordValue(clampValue(corrected, lh.lo, lh.hi))
-	return clampedRaw, clampedCorrected
 }
 
-// clampValue pins v into [lo, hi] so a value outside the range still lands in
-// the distribution at its nearest representable point, which is what the dense
-// path already did.
-func clampValue(v int64, lo, hi time.Duration) int64 {
-	return min(max(v, int64(lo)), int64(hi))
+// recordRaw adds one already-clamped microsecond value to the raw
+// distribution. Results with no Scheduled stamp reach only this one: they
+// cannot be placed against a schedule, so they are absent from the corrected
+// distribution rather than counted in it at their raw latency.
+func (lh *latencyHist) recordRaw(v int64) {
+	if lh.isSparse() {
+		lh.sparseRaw[v]++
+		lh.maybePromote()
+		return
+	}
+	_ = lh.hist.RecordValue(v)
+}
+
+// recordCorrected adds one already-clamped microsecond value to the corrected
+// distribution.
+func (lh *latencyHist) recordCorrected(v int64) {
+	if lh.isSparse() {
+		lh.sparseCorr[v]++
+		lh.maybePromote()
+		return
+	}
+	_ = lh.corrected.RecordValue(v)
+}
+
+// record adds one observation to each distribution, for a Result carrying both.
+// Both values are already clamped microseconds.
+func (lh *latencyHist) record(raw, corrected int64) {
+	lh.recordRaw(raw)
+	lh.recordCorrected(corrected)
+}
+
+// maybePromote goes dense once either map holds more distinct values than the
+// dense array would cost. Checked per record rather than per merge, because
+// recording is the only thing that grows a map.
+func (lh *latencyHist) maybePromote() {
+	if len(lh.sparseRaw) > lh.promoteAt || len(lh.sparseCorr) > lh.promoteAt {
+		lh.promote()
+	}
+}
+
+// hists returns the dense pair, promoting first if the store is still sparse.
+//
+// A sparse store cannot answer a percentile with the values HDR would give —
+// HDR quantises to its bucket midpoints, and reproducing that outside it would
+// be a second implementation of the thing that must not drift. So a question
+// only the dense form can answer is the one event besides a full map that
+// promotes a store. Nothing on the RollingStats path asks: buckets are merged
+// into a dense scratch and the snapshot is read off scratch. A caller who does
+// ask — Snapshot on a bucket Stats — pays for the histogram once and gets an
+// answer identical to a dense store's.
+func (lh *latencyHist) hists() (*hdr.Histogram, *hdr.Histogram) {
+	if lh.isSparse() {
+		lh.promote()
+	}
+	return lh.hist, lh.corrected
 }
 
 // mergeInto folds this store into dst, which must be dense. scratch is built by
@@ -464,8 +503,10 @@ func (lh *latencyHist) mergeInto(dst *latencyHist) {
 		}
 		return
 	}
-	dst.hist.Merge(lh.hist)
-	dst.corrected.Merge(lh.corrected)
+	// Merge reports values it had to drop for falling outside the destination's
+	// range. Both stores are built over the same range, so this is always zero.
+	_ = dst.hist.Merge(lh.hist)
+	_ = dst.corrected.Merge(lh.corrected)
 }
 
 // reset empties the store and keeps its mode. A promoted store stays dense,
@@ -488,4 +529,13 @@ func (lh *latencyHist) bytes() int64 {
 		return int64(len(lh.sparseRaw)+len(lh.sparseCorr)) * sparseBytesPerEntry
 	}
 	return lh.countsLen * bytesPerCount * histogramsPerStats
+}
+
+// newBucketStats returns a Stats whose latency store begins sparse. Only the
+// RollingStats ring uses it: a ring bucket is recorded into, reset, and merged
+// into a dense scratch, and nothing reads its percentiles.
+func newBucketStats(lo, hi time.Duration, sigfigs int) *Stats {
+	s := NewStatsRange(lo, hi, sigfigs)
+	s.lat = newLatencyHist(lo, hi, sigfigs, true)
+	return s
 }
