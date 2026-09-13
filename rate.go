@@ -94,6 +94,42 @@ func (p Phased) Duration() time.Duration {
 	return acc
 }
 
+// Sine ascillates smoothly between Min and Max over Period, starting at Min.
+//
+// Rate(0) is Min, Max at Period/2 and Min again at Period. Starting at the
+// trough rather than mid-curve means a run opens at its lowest load and rises,
+// the way Ramp opens at Start - a curve that began at half load would put the
+// cold-start cost of the run straight into the measurment.
+//
+// Sine is already periodic, so it is not wrapped in Repeat. Repeat is for
+// finite shapes such as Phased and Ramp.
+//
+// Min need not be below Max: the curve runs Min to Max and back either way.
+// Negative values are floored by the Driver and the Min/Max parameterisation
+// is chosen so the literal a caller reaches for cannot drift negative the way
+// an amplitude-and-offset one can.
+//
+// The Driver samples the controller ten times a second, so a Period below
+// about a second renders as visible steps rather than a curve and one near
+// 200ms does not survive sampling at all. Keep Period at a second or more.
+type Sine struct {
+	Min, Max float64
+	Period   time.Duration
+}
+
+// Rate reports the point on the curve at elapsed. A non-positive Period
+// reports Min and never oscillates: there is no cycle to place elapsed on.
+func (s Sine) Rate(elapsed time.Duration) float64 {
+	// Guarded rather than left to the arithmetic: the division below would
+	// produce NaN, which sanitizeRate floors to minRPS — a defined answer, but
+	// the wrong one and arrived at silently.
+	if s.Period <= 0 {
+		return s.Min
+	}
+	frac := float64(elapsed) / float64(s.Period)
+	return s.Min + (s.Max-s.Min)*(1-math.Cos(2*math.Pi*frac))/2
+}
+
 // Adaptive is a RateController whose rate is set externally.
 // Safe for concurrent SetRate/Rate.
 type Adaptive struct {
