@@ -80,5 +80,4 @@
 // The Driver samples the controller ten times a second, so shape features
 // shorter than about 200ms do not exist and a cycle near that length aliases.
 // Keep periods and spikes at a second or more.
-
 package metronome

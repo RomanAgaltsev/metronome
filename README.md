@@ -80,6 +80,10 @@ abandoning a live channel leaks the workers.
 | `Mix(...Weighted)` | weighted random pick among sub-Runners |
 | `Constant`, `Ramp`, `Phased` | static rate profiles |
 | `Adaptive` + `SetRate` | rate driven live from outside (a control loop) |
+| `Sine` | a smooth periodic curve — diurnal load, where a phase table would step |
+| `Sum(...RateController)` | add controllers together — a spike on a baseline, or a floor under `Adaptive` |
+| `Repeat(c, period)` | cycle any finite shape forever; `Repeat(p, p.Duration())` for a phase table |
+| `Scale(factor, c)` | run an agreed profile at a fraction of its intensity |
 | `Driver` | the paced worker pool; `Run(ctx) <-chan Result` |
 | `Pacing` + `ClosedLoop` / `OpenLoop` | how the Driver reacts when the target cannot keep up |
 | `Burst` | rate-limiter burst size; 0 means 1 (smoothest schedule) |
@@ -411,6 +415,58 @@ Every recorder in a `Multi` receives the same `Result`, and `Result` holds `Labe
 by reference, so treat `Result`s as read-only: a recorder that mutates the map
 corrupts what the others see, including the series `LabeledStats` picks.
 
+### Composing a load shape
+
+A `RateController` is a pure function of elapsed time, so shapes compose by arithmetic.
+`Sine` is the one curve composition cannot reach; `Sum`, `Repeat` and `Scale` reach the
+rest.
+
+```go
+// Diurnal: a smooth curve between 100 and 1,000 rps, once an hour, starting low.
+rate := metronome.Sine{Min: 100, Max: 1000, Period: time.Hour}
+
+// A spike on a baseline: 100 rps, rising to 500 for one minute in every ten.
+rate = metronome.Sum(metronome.Constant(100),
+	metronome.Repeat(metronome.Phased{Phases: []metronome.Phase{
+		{Duration: 9 * time.Minute, TargetRPS: 0},
+		{Duration: 1 * time.Minute, TargetRPS: 400},
+	}}, 10*time.Minute))
+
+// The same agreed profile at half intensity — a canary, or a smaller blast radius.
+rate = metronome.Scale(0.5, rate)
+```
+
+**There is no `Burst` controller, and that is the point.** A burst is a constant plus a
+repeating phase table, and the same three combinators also give you a burst on a ramp,
+a burst on a sine, two bursts at different periods, and a burst that is itself a curve.
+(The `Burst` in the table above is unrelated: it is the rate limiter's bucket size.)
+
+`Sine` starts at `Min` and peaks at `Period/2`, so a run opens at its lowest load and
+rises, the way `Ramp` opens at `Start`. It is already periodic, so it is never wrapped
+in `Repeat` — `Repeat` is for finite shapes such as `Phased` and `Ramp`. Pair a phase
+table with its own length, `Repeat(p, p.Duration())`, and the cycle cannot drift from
+the table.
+
+Two more compositions worth knowing, neither of which required `Adaptive` to change:
+`Sum(metronome.Constant(50), adaptive)` puts a floor under a control loop, so a
+feedback signal that collapses cannot drive the run down to nothing; and
+`Scale(0.5, profile)` reruns a named profile at half intensity.
+
+`Sum`, `Repeat` and `Scale` panic at construction on a nil controller — `Sum` naming
+the argument index — rather than mid-run from the rate-updater goroutine. A
+non-positive `Repeat` period delegates to the inner controller instead of cycling, and
+a non-positive `Sine.Period` reports `Min`.
+
+**⚠️ The controller is sampled ten times a second — not once per request.** The
+`Driver` re-reads it every **100 ms** and the limiter holds the last value in between.
+So **shape features shorter than about 200 ms do not exist**: a one-second `Sine` gets
+ten samples and renders as visible steps, and a `Repeat` period near the sampling
+interval aliases into a shape unrelated to the one you asked for. **Keep `Period`, and
+any spike inside it, at a second or more** — ten times the sampling interval, which is
+where the rendered shape stops depending on it. The upside of the same fact: `math.Cos`
+runs 10 times a second for the whole run, so a composed controller costs nothing
+measurable no matter how deep it is.
+
 ### Measured accuracy
 
 Measured on an AMD Ryzen 5 3600 (6 cores / 12 threads), Windows 11, Go 1.26.6,
@@ -448,11 +504,11 @@ go test -run '^$' -bench 'BenchmarkDriverOverhead|BenchmarkStatsRecord' ./...
 
 ## Status
 
-v0.7 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
+v0.8 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
 versions may carry small breaking changes**, always with a migration note in the
 CHANGELOG. Pin an exact version.
 
-Nothing has been removed or changed in meaning since v0.3; v0.4 through v0.7 are
+Nothing has been removed or changed in meaning since v0.3; v0.4 through v0.8 are
 all additive. The `Driver`, `Result` and `Snapshot` a v0.4 consumer compiled
 against behave identically today.
 

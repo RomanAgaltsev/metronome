@@ -9,19 +9,20 @@ import (
 // Sum returns a RateController reporting the sum of every controller's rate at
 // a given elapsed. It panics if cs is empty or if any controller is nil.
 //
-// This is now a spike on a baseline is expressed, which is why the package
+// This is how a spike on a baseline is expressed, which is why the package
 // ships no Burst type:
 //
-// metronome.Sum(metronome.Constant(100),
-//
-//	metronome.Repeat(spike, 10*time.Minute))
+//	metronome.Sum(metronome.Constant(100),
+//		metronome.Repeat(spike, 10*time.Minute))
 //
 // It also puts a floor under an Adaptive controller, so a control signal that
 // collapses cannot drive the run down to nothing.
 //
-// Nothing clamps the total. A sum large enough to exceed what the target or
-// the generator can serve shows up as ErrSaturated and shortfall in the
-// Snapshot, the same as any other over-ambitious rate.
+// Nothing clamps the total, in either direction. A sum large enough to exceed
+// what the target or the generator can serve shows up as ErrSaturated and
+// shortfall in the Snapshot, the same as any other over-ambitious rate; a
+// total that a negative member drags to zero or below is floored by the
+// Driver, as any controller's result is.
 func Sum(cs ...RateController) RateController {
 	if len(cs) == 0 {
 		panic("metronome: Sum requires at least one RateController")

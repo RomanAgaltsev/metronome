@@ -13,12 +13,12 @@ func ExampleSine() {
 	s := metronome.Sine{Min: 100, Max: 300, Period: 10 * time.Second}
 
 	for _, at := range []time.Duration{0, 2500 * time.Millisecond, 5 * time.Second} {
-		fmt.Printf("%5v: %.0f rps\n", at, s.Rate(at))
+		fmt.Printf("%v: %.0f rps\n", at, s.Rate(at))
 	}
 	// Output:
-	//	   0s: 100 rps
+	// 0s: 100 rps
 	// 2.5s: 200 rps
-	//    5s: 300 rps
+	// 5s: 300 rps
 }
 
 // Repeat makes a finite shape endless. Pairing a phase table with its own

@@ -94,12 +94,12 @@ func (p Phased) Duration() time.Duration {
 	return acc
 }
 
-// Sine ascillates smoothly between Min and Max over Period, starting at Min.
+// Sine oscillates smoothly between Min and Max over Period, starting at Min.
 //
 // Rate(0) is Min, Max at Period/2 and Min again at Period. Starting at the
 // trough rather than mid-curve means a run opens at its lowest load and rises,
-// the way Ramp opens at Start - a curve that began at half load would put the
-// cold-start cost of the run straight into the measurment.
+// the way Ramp opens at Start — a curve that began at half load would put the
+// cold-start cost of the run straight into the measurement.
 //
 // Sine is already periodic, so it is not wrapped in Repeat. Repeat is for
 // finite shapes such as Phased and Ramp.
