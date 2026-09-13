@@ -75,3 +75,43 @@ type scaled struct {
 
 // Rate -
 func (s *scaled) Rate(elapsed time.Duration) float64 { return s.factor * s.c.Rate(elapsed) }
+
+// Repeat returns a RateController that cycles c with the given period,
+// reporting c.Rate(elapsed mod period). It panics if c is nil.
+//
+// This is what makes a finite shape endless, and cyclic is what diurnal
+// traffic, periodic spikes and sawtooth all are. Pair it with a phase table's
+// own length so the two cannot drift:
+//
+//	metronome.Repeat(p, p.Duration())
+//
+// Sine is already periodic and is not wrapped in Repeat.
+//
+// A non-positive period delegates straight to c and does not cycle: there is
+// no cycle length to place elapsed on, and unlike a nil controller a zero
+// period plausibly means "do not repeat". Ramp sets the same precedent, where
+// a non-positive Over reports End immediately.
+//
+// The Driver samples the controller ten times a second, so a period near 200ms
+// aliases into a shape unrelated to the one asked for, and anything shorter
+// does not survive sampling at all. Keep the period, and any feature inside
+// it, at a second or more.
+func Repeat(c RateController, period time.Duration) RateController {
+	if c == nil {
+		panic("metronome: Repeat c must not be nil")
+	}
+	return &repeat{c: c, period: period}
+}
+
+type repeat struct {
+	c      RateController
+	period time.Duration
+}
+
+// Rate -
+func (r *repeat) Rate(elapsed time.Duration) float64 {
+	if r.period <= 0 {
+		return r.c.Rate(elapsed)
+	}
+	return r.c.Rate(elapsed % r.period)
+}
