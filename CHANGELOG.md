@@ -1,11 +1,11 @@
 # Changelog
 
-<!-- Release note for whoever cuts v0.9.0: release-please inserts the generated
-     "## [0.9.0]" heading and its Features bullets immediately BEFORE the first
-     existing version heading — i.e. at the BOTTOM of this prose, directly above
-     "## [0.8.0]". Move those generated lines to the top of this section before
-     merging the release PR, the way #31 had to for v0.7.0, and delete this
-     comment. Read the generated artifact; do not predict where it lands. -->
+## [0.9.0](https://github.com/RomanAgaltsev/metronome/compare/v0.8.0...v0.9.0) (2026-09-13)
+
+
+### Features
+
+* sparse bucket storage for RollingStats ([#36](https://github.com/RomanAgaltsev/metronome/issues/36)) ([ab6634b](https://github.com/RomanAgaltsev/metronome/commit/ab6634bb02b198483f9caa6795080e4551525f2e))
 
 #### Sparse bucket storage — a fine-grained window stops costing what it budgets
 
@@ -100,13 +100,6 @@ the old flat cost returns.
   histograms have always been built in. A ring recording nanosecond-resolution
   latencies inside a single millisecond holds about a thousand distinct values and
   never promotes.
-
-## [0.9.0](https://github.com/RomanAgaltsev/metronome/compare/v0.8.0...v0.9.0) (2026-09-13)
-
-
-### Features
-
-* sparse bucket storage for RollingStats ([#36](https://github.com/RomanAgaltsev/metronome/issues/36)) ([ab6634b](https://github.com/RomanAgaltsev/metronome/commit/ab6634bb02b198483f9caa6795080e4551525f2e))
 
 ## [0.8.0](https://github.com/RomanAgaltsev/metronome/compare/v0.7.0...v0.8.0) (2026-09-13)
 
