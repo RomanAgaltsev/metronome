@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"pgregory.net/rapid"
 )
 
 func TestSumAddsEveryController(t *testing.T) {
@@ -162,4 +164,103 @@ func TestRepeatNilPanics(t *testing.T) {
 		}
 	}()
 	Repeat(nil, time.Second)
+}
+
+func TestSineStaysWithinItsBounds(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		lo := rapid.Float64Range(0, 1e6).Draw(rt, "lo")
+		hi := rapid.Float64Range(0, 1e6).Draw(rt, "hi")
+		periodMS := rapid.Int64Range(1, 86_400_000).Draw(rt, "periodMS")
+		elapsedMS := rapid.Int64Range(0, 10*86_400_000).Draw(rt, "elapsedMS")
+
+		s := Sine{
+			Min:    lo,
+			Max:    hi,
+			Period: time.Duration(periodMS) * time.Millisecond,
+		}
+		got := s.Rate(time.Duration(elapsedMS) * time.Millisecond)
+
+		low, high := math.Min(lo, hi), math.Max(lo, hi)
+		// Tolerance is relative: the arithmetic is a subtraction and a
+		// multiplication over values up to 1e6, so absolute error scales.
+		tol := 1e-9 * math.Max(1, high)
+		if got < low-tol || got > high+tol {
+			rt.Fatalf("Rate = %v, outside [%v, %v]", got, low, high)
+		}
+	})
+}
+
+// spikeOnBaseline is the shape the package ships instead of a Burst type:
+// 100 rps, rising to 500 for one minute in every ten.
+func spikeOnBaseline() RateController {
+	return Sum(Constant(100),
+		Repeat(Phased{Phases: []Phase{
+			{Duration: 9 * time.Minute, TargetRPS: 0},
+			{Duration: 1 * time.Minute, TargetRPS: 400},
+		}}, 10*time.Minute))
+}
+
+func TestSpikeOnBaselineComposes(t *testing.T) {
+	c := spikeOnBaseline()
+	tests := []struct {
+		name    string
+		elapsed time.Duration
+		want    float64
+	}{
+		{"quiet at the start", 0, 100},
+		{"still quiet at 8m", 8 * time.Minute, 100},
+		{"spike begins at 9m", 9 * time.Minute, 500},
+		{"still spiking at 9m30s", 9*time.Minute + 30*time.Second, 500},
+		{"quiet again after the cycle", 10 * time.Minute, 100},
+		{"second cycle spike", 19 * time.Minute, 500},
+		{"tenth cycle quiet", 90 * time.Minute, 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := c.Rate(tt.elapsed); math.Abs(got-tt.want) > 1e-9 {
+				t.Errorf("Rate(%v) = %v, want %v", tt.elapsed, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScaleOfAComposedProfile(t *testing.T) {
+	half := Scale(0.5, spikeOnBaseline())
+	if got := half.Rate(0); math.Abs(got-50) > 1e-9 {
+		t.Errorf("quiet at half = %v, want 50", got)
+	}
+	if got := half.Rate(9 * time.Minute); math.Abs(got-250) > 1e-9 {
+		t.Errorf("spike at half = %v, want 250", got)
+	}
+}
+
+func TestSumPutsAFloorUnderAdaptive(t *testing.T) {
+	a := NewAdaptive(500)
+	c := Sum(Constant(50), a)
+	if got := c.Rate(0); math.Abs(got-550) > 1e-9 {
+		t.Errorf("Rate = %v, want 550", got)
+	}
+	a.SetRate(0)
+	if got := c.Rate(time.Second); math.Abs(got-50) > 1e-9 {
+		t.Errorf("collapsed signal = %v, want the 50 floor", got)
+	}
+}
+
+func TestSineWithinBoundsBySweep(t *testing.T) {
+	// The dependency-free counterpart to TestSineStaysWithinItsBounds. Keep
+	// both: this one runs even if the rapid dependency is ever dropped.
+	for _, s := range []Sine{
+		{Min: 0, Max: 1000, Period: 7 * time.Second},
+		{Min: 250, Max: 250, Period: time.Minute},
+		{Min: 900, Max: 100, Period: 3 * time.Second},
+	} {
+		low, high := math.Min(s.Min, s.Max), math.Max(s.Min, s.Max)
+		for i := range 10_000 {
+			at := time.Duration(i) * 3 * time.Millisecond
+			got := s.Rate(at)
+			if got < low-1e-9 || got > high+1e-9 {
+				t.Fatalf("%+v Rate(%v) = %v, outside [%v, %v]", s, at, got, low, high)
+			}
+		}
+	}
 }
