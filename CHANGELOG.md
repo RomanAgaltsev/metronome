@@ -140,6 +140,13 @@ README and in `Sine`'s and `Repeat`'s doc comments, not only here.
 - **No change to `RateController`, `Driver`, the pacer, or any existing controller.**
   This release is purely additive; nothing that compiles against v0.7 changes meaning.
 
+## [0.8.0](https://github.com/RomanAgaltsev/metronome/compare/v0.7.0...v0.8.0) (2026-09-13)
+
+
+### Features
+
+* rate-controller algebra — Sine, Sum, Repeat, Scale ([#34](https://github.com/RomanAgaltsev/metronome/issues/34)) ([3ffa0c5](https://github.com/RomanAgaltsev/metronome/commit/3ffa0c589c636c84d395841fc0dea7af4ef56c7b))
+
 ## [0.7.0](https://github.com/RomanAgaltsev/metronome/compare/v0.6.1...v0.7.0) (2026-09-03)
 
 
