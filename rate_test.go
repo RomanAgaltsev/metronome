@@ -1,6 +1,7 @@
 package metronome
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -127,4 +128,72 @@ func TestPhasedPhaseEndPanicsOnNoPhases(t *testing.T) {
 		}
 	}()
 	(Phased{}).PhaseEnd(0)
+}
+
+func TestSineQuarterPoints(t *testing.T) {
+	s := Sine{Min: 100, Max: 300, Period: 10 * time.Second}
+	tests := []struct {
+		name    string
+		elapsed time.Duration
+		want    float64
+	}{
+		{"starts at Min", 0, 100},
+		{"quarter, rising", 2500 * time.Millisecond, 200},
+		{"half is Max", 5 * time.Second, 300},
+		{"three quarters, falling", 7500 * time.Millisecond, 200},
+		{"full period back to Min", 10 * time.Second, 100},
+		{"second period repeats", 15 * time.Second, 300},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := s.Rate(tt.elapsed); math.Abs(got-tt.want) > 1e-9 {
+				t.Errorf("Rate(%v) = %v, want %v", tt.elapsed, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSineRisesThenFalls(t *testing.T) {
+	s := Sine{Min: 0, Max: 1000, Period: 20 * time.Second}
+	const steps = 200
+	half := s.Period / 2
+
+	prev := s.Rate(0)
+	for i := 1; i <= steps; i++ {
+		at := time.Duration(int64(half) * int64(i) / steps)
+		got := s.Rate(at)
+		if got < prev-1e-9 {
+			t.Fatalf("rise: Rate(%v) = %v dropped below previous %v", at, got, prev)
+		}
+		prev = got
+	}
+	for i := 1; i <= steps; i++ {
+		at := half + time.Duration(int64(half)*int64(i)/steps)
+		got := s.Rate(at)
+		if got > prev+1e-9 {
+			t.Fatalf("fall: Rate(%v) = %v rose above previous %v", at, got, prev)
+		}
+		prev = got
+	}
+}
+
+func TestSineNonPositivePeriodReportsMin(t *testing.T) {
+	for _, p := range []time.Duration{0, -time.Second} {
+		s := Sine{Min: 42, Max: 900, Period: p}
+		for _, at := range []time.Duration{0, time.Second, time.Hour} {
+			if got := s.Rate(at); got != 42 {
+				t.Errorf("Period=%v Rate(%v) = %v, want 42 (Min)", p, at, got)
+			}
+		}
+	}
+}
+
+func TestSineMinAboveMaxRunsInverted(t *testing.T) {
+	s := Sine{Min: 300, Max: 100, Period: 10 * time.Second}
+	if got := s.Rate(0); math.Abs(got-300) > 1e-9 {
+		t.Errorf("Rate(0) = %v, want 300", got)
+	}
+	if got := s.Rate(5 * time.Second); math.Abs(got-100) > 1e-9 {
+		t.Errorf("Rate(P/2) = %v, want 100", got)
+	}
 }

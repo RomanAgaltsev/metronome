@@ -118,6 +118,8 @@ linters:
             - "github.com/HdrHistogram/hdrhistogram-go"
             # Goroutine-leak detection for the worker pool (Task 8, tests only).
             - "go.uber.org/goleak"
+            # Property-based testing for the rate-controller algebra (v0.8, tests only).
+            - "pgregory.net/rapid"
 
     revive:
       severity: warning

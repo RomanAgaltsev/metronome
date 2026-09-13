@@ -1,5 +1,145 @@
 # Changelog
 
+<!-- Release note for whoever cuts v0.8.0: release-please inserts the generated
+     "## [0.8.0]" heading and its Features bullets immediately BEFORE the first
+     existing version heading — i.e. at the BOTTOM of this prose, directly above
+     "## [0.7.0]". Move those generated lines to the top of this section before
+     merging the release PR, the way #31 had to for v0.7.0, and delete this
+     comment. Read the generated artifact; do not predict where it lands. -->
+
+#### Rate-controller algebra — `Sine`, `Sum`, `Repeat`, `Scale`
+
+v0.7 took the `Recorder` seam and built a small algebra over it rather than a zoo of
+concrete types. This is the same move on the other seam. `RateController` has had
+exactly one shape of extension since v0.1 — write another struct with a
+`Rate(elapsed) float64` method — so every load shape a consumer could express was one
+of `Constant`, `Ramp`, `Phased`, `Adaptive`, or nothing.
+
+```go
+// Sine oscillates smoothly between Min and Max over Period, starting at Min.
+type Sine struct {
+	Min, Max float64
+	Period   time.Duration
+}
+
+// Sum reports the sum of every controller's rate at elapsed.
+func Sum(cs ...RateController) RateController
+
+// Repeat cycles c, reporting c.Rate(elapsed mod period).
+func Repeat(c RateController, period time.Duration) RateController
+
+// Scale multiplies c's rate by factor.
+func Scale(factor float64, c RateController) RateController
+```
+
+One leaf type and three combinators, all of them still pure functions of elapsed time:
+no clock, no goroutine, no channel, no state. Every test of this surface is a table of
+elapsed-to-expected with nothing to synchronise, and that property is load-bearing —
+it is the reason `Jitter` is not here.
+
+The ROADMAP asked for three controllers: sine, spike/burst, and custom step sequences.
+**One of the three already shipped** — "custom step sequences" is `Phased`, which has
+been there since v0.1 — and of the remaining two, only one needed a type.
+
+#### There is no `Burst` type, because a burst composes
+
+```go
+metronome.Sum(metronome.Constant(100),
+	metronome.Repeat(metronome.Phased{Phases: []metronome.Phase{
+		{Duration: 9 * time.Minute, TargetRPS: 0},
+		{Duration: 1 * time.Minute, TargetRPS: 400},
+	}}, 10*time.Minute))
+```
+
+100 rps, rising to 500 for one minute in every ten. A `Burst` struct would express
+that one shape. The composition also expresses a burst on a ramp, a burst on a sine,
+two bursts at different periods, and a burst that is itself a curve — none of which
+needed designing, and none of which is a second way to say the first thing.
+
+(`Driver.Burst` is unrelated and unchanged: it is the rate limiter's bucket size.)
+
+#### `Repeat` is the load-bearing one
+
+It is what makes a finite shape endless, and *cyclic* is what diurnal traffic, periodic
+spikes and sawtooth all actually are. It pairs directly with the introspection v0.7
+added:
+
+```go
+metronome.Repeat(p, p.Duration())   // cycle a phase table forever
+```
+
+which is the reason `Phased.Duration()` exists — one place to change the table's
+length rather than two.
+
+`Scale` earns its place on reuse rather than arithmetic. A `Sine` can be rescaled by
+hand through `Min` and `Max`; a `Phased` table cannot without rewriting every phase.
+`Scale(0.5, profile)` runs an agreed profile at half intensity — a canary, or a
+reduced-blast-radius rerun of the same shape.
+
+#### ⚠️ The controller is sampled ten times a second, not once per request
+
+`Driver` re-reads the controller every `rateUpdateInterval` — **100 ms** — and the
+limiter holds the last value in between. Two consequences, both of which a consumer
+would otherwise discover by being confused:
+
+- **Shape features shorter than about 200 ms do not exist.** A one-second `Sine` gets
+  ten samples and renders as visible steps; a `Repeat` period near the sampling
+  interval aliases into a shape unrelated to the one asked for. **Keep `Period`, and
+  any spike inside it, at a second or more** — ten times the sampling interval, which
+  is where the rendered shape stops depending on it.
+- **`math.Cos` is not on any hot path.** At 10 Hz for a whole run its cost is
+  unmeasurable in context, which is why this release ships no benchmark: nothing here
+  is on the per-`Result` path that `BenchmarkStatsRecord` measures.
+
+This is the same class of hazard as v0.7's `Multi` backpressure note — a
+generator-side limit that presents as a target-side result — so it is stated in the
+README and in `Sine`'s and `Repeat`'s doc comments, not only here.
+
+#### Two things the algebra gives away
+
+- **`Sum(metronome.Constant(50), adaptive)`** puts a floor under a control loop, so a
+  PromQL signal that collapses cannot drive the run down to nothing. `Adaptive` did
+  not have to change.
+- **`Scale(0.5, profile)`** reruns any agreed profile at a fraction of its intensity.
+
+#### Failure modes follow the rules the package already had
+
+- **`Sum`, `Repeat` and `Scale` panic on a nil `RateController` at construction**, and
+  `Sum` names the offending argument index, because a variadic call site is where the
+  nil came from. This is the rule `Multi` and `Filter` follow. A controller that
+  panicked on its first `Rate` call instead would do so from the rate-updater
+  goroutine, mid-run, after load was already being generated.
+- **`Sum()` with no controllers panics**, exactly as `Multi()` does. A sum of nothing
+  is as useless as a fan-out to nothing, and both are caught at the call site.
+- **`Repeat` with a non-positive period delegates straight to `c`.** A nil controller
+  is certainly a bug; a zero period plausibly means "do not cycle", and `Ramp` already
+  sets the precedent that a non-positive duration resolves to a defined answer.
+- **`Sine` with a non-positive `Period` reports `Min` and never oscillates.** This is
+  an explicit guard, not arithmetic: the formula divides by `Period`, so a zero would
+  produce `NaN`, which the `Driver` floors to the minimum rate — a defined answer, but
+  the wrong one, arrived at silently.
+- **`Sine` does not validate `Min > Max`.** The curve runs `Min → Max → Min` whichever
+  way round they are, and that is documented as supported rather than guarded against.
+- **Negative and non-finite results are already handled** by the `Driver`, which maps
+  `NaN` to the minimum rate, honours `+Inf` as "as fast as possible", and floors zero
+  and negatives. Nothing here re-guards it. It is also why `Sine` is parameterised by
+  `Min`/`Max` rather than amplitude-and-offset: the literal a caller reaches for cannot
+  drift negative and get silently floored.
+
+#### Deliberately not in this release
+
+- **No `Clamp(min, max, c)`** — deferred, not rejected. The `Driver` already makes the
+  engine safe, so a clamp would be documentation at the call site rather than
+  protection. Revisit if composed profiles get deep enough that a reader cannot see
+  the ceiling.
+- **No `Jitter`** — it needs a seeded RNG and breaks `Rate` being a pure function of
+  elapsed, which is what keeps this whole area testable without a clock.
+- **No `Sine.Phase`** — `elapsed` is run-relative, not wall-clock, so "a diurnal curve
+  aligned to 9am" is not expressible with or without one. The thing a phase field looks
+  like it buys cannot be bought here at any price.
+- **No change to `RateController`, `Driver`, the pacer, or any existing controller.**
+  This release is purely additive; nothing that compiles against v0.7 changes meaning.
+
 ## [0.7.0](https://github.com/RomanAgaltsev/metronome/compare/v0.6.1...v0.7.0) (2026-09-03)
 
 
