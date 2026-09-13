@@ -186,8 +186,12 @@ func NewRollingStats(cfg Rolling) *RollingStats {
 		origin:   now,
 		curStart: now,
 	}
+	// Buckets only, and deliberately: life and scratch stay dense. A bucket is
+	// recorded into, reset, and merged into scratch, and nothing reads its
+	// percentiles, so it can start as a value-count map and buy its histogram
+	// only once it holds enough distinct values to be worth one.
 	for i := range rs.ring {
-		rs.ring[i] = NewStatsRange(c.lo, c.hi, c.sigfigs)
+		rs.ring[i] = newBucketStats(c.lo, c.hi, c.sigfigs)
 	}
 	return rs
 }

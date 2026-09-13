@@ -381,3 +381,18 @@ func TestRollingWindowMatchesAStatsFedTheSameLiveResults(t *testing.T) {
 		t.Fatalf("Codes=%v want %v", win.Codes, want.Codes)
 	}
 }
+
+func TestRingBucketsStartSparse(t *testing.T) {
+	rs := NewRollingStats(Rolling{})
+	for i, b := range rs.ring {
+		if !b.lat.isSparse() {
+			t.Errorf("ring bucket %d did not start sparse", i)
+		}
+	}
+	if rs.life.lat.isSparse() {
+		t.Error("the lifetime aggregate must be dense")
+	}
+	if rs.scratch.lat.isSparse() {
+		t.Error("the scratch merge target must be dense")
+	}
+}
