@@ -165,3 +165,46 @@ func TestWindowIdenticalAcrossPromotion(t *testing.T) {
 	}
 	sameSnapshot(t, sparse.Window(), dense.Window(), "Window after promotion")
 }
+
+// TestSparseMemoryWinAtThousandBuckets measures what the representation
+// actually saves at the configuration that motivated it. The ROADMAP's ~85x was
+// an estimate; this is where the published figures come from.
+//
+// It is a measurement, not an assertion: a ratio pinned to a number would fail
+// on a Go release that changed map overhead, and the honest guard is that the
+// figure is republished when it moves.
+func TestSparseMemoryWinAtThousandBuckets(t *testing.T) {
+	const perBucket = 100
+
+	// Every bucket filled, which is the load the 1,000-bucket ring is sized
+	// for: a fine-grained window over a steady run. One Result per distinct
+	// latency, spread over 97 values, so no bucket comes near promoting.
+	clk := NewManualClock(time.Now())
+	cfg := Rolling{Buckets: 1000, Clock: clk}
+	rs := NewRollingStats(cfg)
+	bucketWidth := 10 * time.Second / 1000
+
+	for range 1000 {
+		for i := range perBucket {
+			at := clk.Now()
+			rs.Record(Result{
+				Start: at, Scheduled: at,
+				Latency: time.Duration(i%97+1) * time.Millisecond,
+			})
+		}
+		clk.Advance(bucketWidth)
+	}
+	t.Logf("every bucket filled with %d Results: sparse %d B, ceiling %d B, ratio %.1fx",
+		perBucket, rs.Bytes(), cfg.Bytes(), float64(cfg.Bytes())/float64(rs.Bytes()))
+
+	// The other end of the same knob: a short burst into a ring sized for a
+	// long one, where most buckets never see a Result at all. This is the case
+	// the spec describes as ten Results in a 136 KiB array.
+	burst := NewRollingStats(Rolling{Buckets: 1000, Clock: NewManualClock(time.Now())})
+	base := burst.clock.Now()
+	for i := range perBucket {
+		burst.Record(Result{Start: base, Scheduled: base, Latency: time.Duration(i%97+1) * time.Millisecond})
+	}
+	t.Logf("one bucket touched: sparse %d B, ceiling %d B, ratio %.1fx",
+		burst.Bytes(), cfg.Bytes(), float64(cfg.Bytes())/float64(burst.Bytes()))
+}

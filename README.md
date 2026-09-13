@@ -105,7 +105,8 @@ abandoning a live channel leaks the workers.
 | `Skipper.Skipped()` | what an exclusion left out, so `Count + Skipped` is the whole population |
 | `Drain(ch, rec)` | the canonical result-channel loop, named so it stops being rewritten |
 | `Stats.Merge` | fold one `Stats` into another — ad-hoc subtotals, sharded recording, combining runs |
-| `Bytes()` on `Stats` / `RollingStats` / `LabeledStats` / `Rolling` | price the histogram memory, before or after building it |
+| `Bytes()` on `Stats` / `RollingStats` / `LabeledStats` | what the aggregate currently holds — a `RollingStats` starts far under its budget |
+| `Rolling.Bytes()` | price a ring configuration before building it; the ceiling every bucket promoting would reach |
 | `Phased.PhaseEnd` / `Phased.Duration` | phase boundaries, so a warmup and a phase table cannot drift |
 
 ## Pacing model — read this before trusting the numbers
@@ -239,14 +240,22 @@ Measured on the machine described under [Measured accuracy](#measured-accuracy):
 |---|---|
 | `Stats.Record` | 201 ns/op |
 | `RollingStats.Record` | 256 ns/op — about **+55 ns**, or 1.3×, for the second view |
-| `Window()`, ring full of traffic | 774 µs/op, 2 allocs |
-| `Window()`, ring live but empty (a stall) | 3.1 µs/op, 2 allocs |
+| `Window()`, ring full of traffic | 700 µs/op, 2 allocs |
+| `Window()`, ring live but empty (a stall) | 2.9 µs/op, 2 allocs |
 
 `Record` is the hot path and pays a flat 55 ns. `Window()` is not: it merges the
-live buckets' histograms, so it costs roughly `live × countsLen`, independent of
-how many `Result`s are in them — 0.7 ms at the default range and a full ring. Poll
-it at 1–10 Hz from a control loop, not per request. Empty buckets are skipped, so
-the stall case a control loop polls hardest in is the cheap one. Reproduce with:
+live buckets into a dense scratch target and reads the percentiles off that, so it
+costs roughly `live × countsLen` — 0.7 ms at the default range and a full ring.
+Poll it at 1–10 Hz from a control loop, not per request. Empty buckets are skipped,
+so the stall case a control loop polls hardest in is the cheap one.
+
+**v0.9's sparse buckets did not make this cheaper**, and the honest reason is worth
+stating: the cost is in the destination, not the sources. A sparse bucket merges as
+a walk over its entries rather than over a 17,408-slot array, but the scratch target
+is reset and quantile-read across its whole array either way, and that dominates.
+The one claim that did change is the old "independent of how many `Result`s are in
+them": a sparse bucket's merge now scales with the distinct latencies it holds, so a
+busier bucket costs marginally more until it promotes. Reproduce with:
 
 ```bash
 go test -run '^$' -bench 'BenchmarkStatsRecord|BenchmarkRollingStats' -benchtime=2s -benchmem ./...
@@ -255,28 +264,39 @@ go test -run '^$' -bench 'BenchmarkStatsRecord|BenchmarkRollingStats' -benchtime
 
 #### Memory
 
-A `RollingStats` allocates `Buckets+2` histogram pairs — the ring, the lifetime
+A `RollingStats` is sized for `Buckets+2` histogram pairs — the ring, the lifetime
 aggregate and a scratch merge target — so `Buckets` multiplies memory as well as
 resolution. Price any configuration before building it with `Rolling.Bytes()`.
 
-| `Rolling` | Footprint |
+| `Rolling` | Ceiling |
 |---|---|
 | `Rolling{}` (10 buckets, 1µs–60s, 3 sig figs) | 3.2 MiB |
 | `Rolling{Buckets: 100}` | 27 MiB |
 | `Rolling{Buckets: 1000}` | 266 MiB |
 | `Rolling{Buckets: 1000, Lo: time.Millisecond, Hi: time.Second, Sigfigs: 1}` | 2.0 MiB |
 
-The last two rows are the rule: **narrow the histogram range when you want a large
-ring.** `Bytes()` panics on exactly the configurations `NewRollingStats` panics on,
-so pricing an unbuildable config reports the problem rather than a number for it.
+**These are ceilings, not what a run costs.** Since v0.9 a ring bucket starts as a
+sparse value-to-count store and allocates a dense HDR histogram only once it holds
+enough distinct latencies to be worth one — about 2,785 distinct microseconds at the
+default range. `Rolling.Bytes()` is the budget above; `RollingStats.Bytes()` reports
+what is actually held, and is typically far below it. Measured on the 266 MiB row:
 
-Underneath the arithmetic is a representation mismatch, not a tuning problem. A
-fine-grained ring — 1,000 buckets over 10s at 1,000 rps — puts about ten `Result`s
-in each 136 KiB dense array, roughly **13 KiB per recorded sample**, and HDR is
-array-backed. Sparse bucket storage is the fix and it is a known, costed trade
-rather than an oversight: it is demand-gated on the roadmap, so open an issue if
-you want a fine-grained window and it becomes a decision rather than a
-rediscovery.
+| `Rolling{Buckets: 1000}` under load | Held | vs. ceiling |
+|---|---|---|
+| every bucket filled, 100 `Result`s over 97 distinct latencies | 9.8 MiB | **27× smaller** |
+| a short burst, one bucket touched | 0.54 MiB | **492× smaller** |
+
+A bucket that does promote keeps its histogram for the life of the ring, so a run
+whose latencies genuinely spread wide converges on the ceiling — which is why the
+ceiling is still the number to budget with. The last two table rows remain the rule:
+**narrow the histogram range when you want a large ring.** `Rolling.Bytes()` panics
+on exactly the configurations `NewRollingStats` panics on, so pricing an unbuildable
+config reports the problem rather than a number for it.
+
+The representation is invisible in output: every `Window()` and `Snapshot()` field is
+identical whether a bucket is sparse or dense, clamp counters included, and a
+property test compares a sparse ring against a dense one on random streams to keep it
+that way.
 
 ### Per-endpoint breakdown
 
@@ -504,13 +524,15 @@ go test -run '^$' -bench 'BenchmarkDriverOverhead|BenchmarkStatsRecord' ./...
 
 ## Status
 
-v0.8 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
+v0.9 — API is stable in shape and pinned by two consumers, but **pre-v1: minor
 versions may carry small breaking changes**, always with a migration note in the
 CHANGELOG. Pin an exact version.
 
-Nothing has been removed or changed in meaning since v0.3; v0.4 through v0.8 are
-all additive. The `Driver`, `Result` and `Snapshot` a v0.4 consumer compiled
-against behave identically today.
+Nothing has been removed or changed in meaning since v0.3; v0.4 through v0.9 are
+additive but for one named exception. **v0.9 changed what `RollingStats.Bytes()`
+reports** — the memory actually held rather than the budgeted ceiling. No signature
+changed; `Rolling.Bytes()` is still the ceiling. The `Driver`, `Result` and
+`Snapshot` a v0.4 consumer compiled against behave identically today.
 
 ## Used by
 

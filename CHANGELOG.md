@@ -1,11 +1,112 @@
 # Changelog
 
-<!-- Release note for whoever cuts v0.8.0: release-please inserts the generated
-     "## [0.8.0]" heading and its Features bullets immediately BEFORE the first
+<!-- Release note for whoever cuts v0.9.0: release-please inserts the generated
+     "## [0.9.0]" heading and its Features bullets immediately BEFORE the first
      existing version heading — i.e. at the BOTTOM of this prose, directly above
-     "## [0.7.0]". Move those generated lines to the top of this section before
+     "## [0.8.0]". Move those generated lines to the top of this section before
      merging the release PR, the way #31 had to for v0.7.0, and delete this
      comment. Read the generated artifact; do not predict where it lands. -->
+
+#### Sparse bucket storage — a fine-grained window stops costing what it budgets
+
+A `RollingStats` ring bucket is sized by its *configuration*, not by what it holds.
+At `Rolling{Buckets: 1000}` that is 266 MiB of HDR count arrays, and a bucket in a
+1,000-bucket ring over ten seconds at 1,000 rps carries about ten `Result`s — roughly
+**13 KiB of array per recorded sample**. That is a representation mismatch, not a
+tuning problem, and it is why the memory table's advice had to be "narrow the range".
+
+Each bucket now starts as a sparse value-to-count store and allocates a dense
+histogram only once it holds enough distinct latencies to be worth one. Nothing else
+moved: **no symbol was added, removed or renamed.**
+
+| `Rolling{Buckets: 1000}` | Held | vs. the 266 MiB ceiling |
+|---|---|---|
+| every bucket filled, 100 `Result`s over 97 distinct latencies | 9.8 MiB | **27× smaller** |
+| a short burst, one bucket touched | 0.54 MiB | **492× smaller** |
+
+The ROADMAP estimated ~85×. Measured, the answer is a range with that estimate inside
+it, because the ratio is a property of the load and not of the code — which is the
+argument for measuring it rather than restating it. This is the second release where
+an estimate moved on contact with a benchmark.
+
+#### ⚠️ `RollingStats.Bytes()` now reports what is held, not what was budgeted
+
+The one externally visible change in the release, named rather than hidden:
+
+```go
+cfg := metronome.Rolling{Buckets: 1000}
+rs := metronome.NewRollingStats(cfg)
+
+cfg.Bytes()  // 279,085,056 — the ceiling, unchanged. Budget with this.
+rs.Bytes()   // ~570,000 on a fresh ring, rising as buckets promote.
+```
+
+Before v0.9 these two were equal by construction and `RollingStats.Bytes()` was a
+constant. It now takes the lock and walks the ring, because it reads state that
+`Record` can change underneath it. `Rolling.Bytes()` is untouched and remains the
+number to size a deployment with: it is what the ring converges on if every bucket
+promotes. A monitor asserting `rs.Bytes() == cfg.Bytes()` will now fail — that is the
+change, and the fix is to compare against `cfg.Bytes()` as a ceiling.
+
+`Stats.Bytes()` and `LabeledStats.Bytes()` are unaffected in meaning. But a
+`LabeledStats[*RollingStats]` total is now a sum over children that hold different
+amounts, where it used to be the child size times the series count.
+
+#### The representation is invisible, and that is the tested property
+
+Every `Window()` and `Snapshot()` field reads identically whether a bucket is sparse
+or dense — percentiles, counts, and `Clamped`/`CorrectedClamped` in particular, since
+a consumer reads those to know whether its percentiles understate reality. quiver
+treats a clamp as a measurement-validity failure rather than a pass, so a sparse store
+that counted them differently would turn a failed measurement into a passing one.
+
+The proof is a `rapid` property comparing a sparse ring against a dense one built from
+the same config over random streams, plus a walk across the promotion boundary and a
+clamping table that drives latencies outside the range in both directions. A sparse
+store cannot answer a percentile the way HDR does — HDR quantises to its bucket
+midpoints, and reproducing that outside HDR would be a second implementation of the
+thing that must not drift — so asking one for a percentile promotes it first. Nothing
+on the ring path asks: `Window()` merges the buckets into a dense scratch target and
+reads the snapshot off that.
+
+#### What this did *not* make faster
+
+`Window()` costs **700 µs/op** over a full default ring and **2.9 µs/op** over a
+stalled one, against 730 µs and 2.7 µs in v0.5. That is unchanged, and the plan
+expected an improvement. The honest reason: a sparse bucket merges as a walk over its
+entries instead of over a 17,408-slot array, but the *destination* is dense and is
+reset and quantile-read across its whole array either way. The cost was never in the
+sources.
+
+One older claim does change. v0.5 said `Window()` is "independent of how many
+`Result`s are in them". A sparse bucket's merge scales with the distinct latencies it
+holds, so a busier bucket now costs marginally more until it promotes, at which point
+the old flat cost returns.
+
+#### Details worth knowing
+
+- **A promoted bucket stays dense.** `reset()` keeps the mode, matching what
+  `Stats.reset` always did by calling `hist.Reset` rather than reallocating. A bursty
+  run converges on the old cost instead of thrashing at the break-even boundary.
+- **The threshold is computed per configuration**, not tuned for the default: about
+  2,785 distinct microseconds at 1µs–60s with 3 significant figures, and its own
+  break-even for any other range. A map entry is costed at 50 bytes — key, value and
+  the runtime's per-bucket overhead — deliberately over-estimated, since promoting
+  slightly early costs memory that was budgeted anyway.
+- **`life` and `scratch` stay dense.** `scratch` is the only merge destination, and a
+  merge into a sparse target is a panic rather than a case: writing one would be
+  shipping a code path nothing calls.
+- **Distinct values are counted in whole microseconds**, which is the unit the
+  histograms have always been built in. A ring recording nanosecond-resolution
+  latencies inside a single millisecond holds about a thousand distinct values and
+  never promotes.
+
+## [0.8.0](https://github.com/RomanAgaltsev/metronome/compare/v0.7.0...v0.8.0) (2026-09-13)
+
+
+### Features
+
+* rate-controller algebra — Sine, Sum, Repeat, Scale ([#34](https://github.com/RomanAgaltsev/metronome/issues/34)) ([3ffa0c5](https://github.com/RomanAgaltsev/metronome/commit/3ffa0c589c636c84d395841fc0dea7af4ef56c7b))
 
 #### Rate-controller algebra — `Sine`, `Sum`, `Repeat`, `Scale`
 
@@ -139,13 +240,6 @@ README and in `Sine`'s and `Repeat`'s doc comments, not only here.
   like it buys cannot be bought here at any price.
 - **No change to `RateController`, `Driver`, the pacer, or any existing controller.**
   This release is purely additive; nothing that compiles against v0.7 changes meaning.
-
-## [0.8.0](https://github.com/RomanAgaltsev/metronome/compare/v0.7.0...v0.8.0) (2026-09-13)
-
-
-### Features
-
-* rate-controller algebra — Sine, Sum, Repeat, Scale ([#34](https://github.com/RomanAgaltsev/metronome/issues/34)) ([3ffa0c5](https://github.com/RomanAgaltsev/metronome/commit/3ffa0c589c636c84d395841fc0dea7af4ef56c7b))
 
 ## [0.7.0](https://github.com/RomanAgaltsev/metronome/compare/v0.6.1...v0.7.0) (2026-09-03)
 
