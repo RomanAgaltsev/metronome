@@ -39,7 +39,11 @@
 // For a run being watched while it happens, use RollingStats instead of Stats.
 // It records into both a lifetime aggregate and a ring of trailing buckets, so
 // Snapshot keeps its cumulative meaning while Window reports only the recent
-// past. The distinction matters most for Snapshot.MaxScheduleLag, which is a
+// past. A ring bucket stores its latencies sparsely until it holds enough
+// distinct values to earn a dense histogram, so Rolling.Bytes is the ceiling a
+// configuration budgets for and RollingStats.Bytes is what a run actually
+// holds — usually far less. The representation is invisible: every Window and
+// Snapshot field reads the same either way. The distinction matters most for Snapshot.MaxScheduleLag, which is a
 // lifetime maximum: one early stall pins it for the rest of the run, and a
 // target that stops answering never moves any cumulative number at all, because
 // there are no new Results to move it.

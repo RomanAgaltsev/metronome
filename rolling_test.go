@@ -381,3 +381,51 @@ func TestRollingWindowMatchesAStatsFedTheSameLiveResults(t *testing.T) {
 		t.Fatalf("Codes=%v want %v", win.Codes, want.Codes)
 	}
 }
+
+func TestRingBucketsStartSparse(t *testing.T) {
+	rs := NewRollingStats(Rolling{})
+	for i, b := range rs.ring {
+		if !b.lat.isSparse() {
+			t.Errorf("ring bucket %d did not start sparse", i)
+		}
+	}
+	if rs.life.lat.isSparse() {
+		t.Error("the lifetime aggregate must be dense")
+	}
+	if rs.scratch.lat.isSparse() {
+		t.Error("the scratch merge target must be dense")
+	}
+}
+
+func TestRollingStatsBytesStartsBelowItsCeiling(t *testing.T) {
+	cfg := Rolling{Buckets: 100}
+	rs := NewRollingStats(cfg)
+
+	ceiling := cfg.Bytes()
+	got := rs.Bytes()
+	if got >= ceiling {
+		t.Errorf("fresh RollingStats reports %d, want well under the %d ceiling", got, ceiling)
+	}
+}
+
+func TestRollingStatsBytesRisesTowardTheCeiling(t *testing.T) {
+	cfg := Rolling{Buckets: 4}
+	rs := NewRollingStats(cfg)
+	start := rs.Bytes()
+
+	// Distinct values are counted in whole microseconds, so the spread has to
+	// cross the store's own threshold for any bucket to promote.
+	spread := rs.ring[0].lat.promoteAt * 2
+
+	base := time.Now()
+	for i := range 200_000 {
+		r := Result{Start: base, Scheduled: base, Latency: time.Duration(i%spread+1) * time.Microsecond}
+		rs.Record(r)
+	}
+	if rs.Bytes() <= start {
+		t.Errorf("Bytes did not rise as buckets promoted: %d then %d", start, rs.Bytes())
+	}
+	if rs.Bytes() > cfg.Bytes() {
+		t.Errorf("Bytes %d exceeded the ceiling %d", rs.Bytes(), cfg.Bytes())
+	}
+}

@@ -30,17 +30,30 @@ func TestStatsBytesTracksANarrowerRange(t *testing.T) {
 	}
 }
 
-func TestRollingStatsBytesEqualsItsConfigBytes(t *testing.T) {
-	// Two derivations of one formula must not drift apart.
+func TestRollingStatsBytesConvergesOnItsConfigBytes(t *testing.T) {
+	// Two derivations of one formula must not drift apart. Since v0.9 they meet
+	// at the ceiling rather than on the first call: ring buckets start sparse,
+	// so a fresh RollingStats reports far less than the budget and rises toward
+	// it as buckets promote. Promoting every bucket by hand puts the ring in the
+	// state cfg.Bytes() prices, which is where the two formulas must still agree
+	// exactly — the tripwire for an hdr.New sizing change is unchanged.
 	for _, cfg := range []Rolling{
 		{},
 		{Window: time.Second, Buckets: 4},
 		{Window: 30 * time.Second, Buckets: 3, Lo: time.Millisecond, Hi: time.Second, Sigfigs: 2},
 	} {
-		want := cfg.Bytes()
-		got := NewRollingStats(cfg).Bytes()
-		if got != want {
-			t.Fatalf("NewRollingStats(%+v).Bytes()=%d want cfg.Bytes()=%d", cfg, got, want)
+		ceiling := cfg.Bytes()
+		rs := NewRollingStats(cfg)
+
+		if fresh := rs.Bytes(); fresh >= ceiling {
+			t.Fatalf("NewRollingStats(%+v).Bytes()=%d want below the %d ceiling", cfg, fresh, ceiling)
+		}
+
+		for _, b := range rs.ring {
+			b.lat.promote()
+		}
+		if got := rs.Bytes(); got != ceiling {
+			t.Fatalf("fully promoted NewRollingStats(%+v).Bytes()=%d want cfg.Bytes()=%d", cfg, got, ceiling)
 		}
 	}
 }

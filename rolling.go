@@ -186,8 +186,12 @@ func NewRollingStats(cfg Rolling) *RollingStats {
 		origin:   now,
 		curStart: now,
 	}
+	// Buckets only, and deliberately: life and scratch stay dense. A bucket is
+	// recorded into, reset, and merged into scratch, and nothing reads its
+	// percentiles, so it can start as a value-count map and buy its histogram
+	// only once it holds enough distinct values to be worth one.
 	for i := range rs.ring {
-		rs.ring[i] = NewStatsRange(c.lo, c.hi, c.sigfigs)
+		rs.ring[i] = newBucketStats(c.lo, c.hi, c.sigfigs)
 	}
 	return rs
 }
@@ -308,15 +312,29 @@ func (rs *RollingStats) Window() Snapshot {
 	return rs.scratch.snapshot(rs.covered(now))
 }
 
-// Bytes reports the memory this RollingStats holds for its histograms: the
-// lifetime aggregate, the scratch merge target, and every ring bucket, all
-// built from one Rolling and therefore all the same size.
+// Bytes reports the memory this RollingStats currently holds for its latency
+// distributions: the lifetime aggregate, the scratch merge target, and every
+// ring bucket in whichever mode it is presently in.
 //
-// It equals the Rolling.Bytes() of the config it was built from, and needs no
-// lock for the same reason Stats.Bytes does not.
+// This is an actual figure, not a projection, and it can sit far below the
+// [Rolling.Bytes] of the config it was built from. A bucket starts as a sparse
+// value-to-count store and only allocates a dense histogram once it holds
+// enough distinct values to be worth one, so a run with few distinct latencies
+// per bucket never pays the full price. Rolling.Bytes remains the ceiling: what
+// this returns once every bucket has promoted.
+//
+// It takes the lock, which the version that returned a constant did not need.
+// This one walks the ring while Record may be promoting a bucket out from under
+// it.
 func (rs *RollingStats) Bytes() int64 {
-	const extraStats = 2 // the lifetime aggregate and the scratch merge target
-	return int64(len(rs.ring)+extraStats) * rs.life.Bytes()
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+
+	total := rs.life.Bytes() + rs.scratch.Bytes()
+	for _, b := range rs.ring {
+		total += b.Bytes()
+	}
+	return total
 }
 
 // histogramCounts is the length of the counts array hdr.New allocates for a
@@ -372,6 +390,11 @@ func histogramCounts(lo, hi time.Duration, sigfigs int) int64 {
 //
 // It panics on exactly the configurations NewRollingStats panics on, so pricing
 // an unbuildable config reports the problem rather than a number for it.
+//
+// This is the ceiling, reached once every ring bucket has promoted to a dense
+// histogram. Buckets start sparse, so a live [RollingStats.Bytes] reports what
+// is actually held and is typically well under this. Budget with this one; read
+// the other to see what a run costs.
 func (cfg Rolling) Bytes() int64 {
 	c := cfg.config()
 
