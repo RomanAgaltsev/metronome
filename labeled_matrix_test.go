@@ -238,9 +238,19 @@ func TestLabeledStatsKnobEndsHoldOverRollingChildren(t *testing.T) {
 			}
 
 			// Bytes reaches through the optional interface to rolling children
-			// exactly as it does to flat ones.
-			if got, want := ls.Bytes(), int64(tc.wantLen+1)*ls.Total().Bytes(); got != want {
+			// exactly as it does to flat ones. Since v0.9 a RollingStats reports
+			// what it actually holds rather than what it budgeted, and children
+			// holding different Results hold different amounts — so the sum is
+			// over the children themselves, not wantLen copies of the total.
+			want := ls.Total().Bytes()
+			for _, child := range ls.Series() {
+				want += child.Bytes()
+			}
+			if got := ls.Bytes(); got != want {
 				t.Fatalf("Bytes()=%d want %d (%d series + the total)", got, want, tc.wantLen)
+			}
+			if len(ls.Series()) != tc.wantLen {
+				t.Fatalf("Series()=%d want %d", len(ls.Series()), tc.wantLen)
 			}
 		})
 	}
