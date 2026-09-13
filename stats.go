@@ -407,9 +407,11 @@ func (lh *latencyHist) promote() {
 	lh.sparseRaw, lh.sparseCorr = nil, nil
 	lh.allocDense()
 	for v, n := range raw {
+		//nolint:gosec // a sparse map only ever holds values clamp already bounded
 		_ = lh.hist.RecordValues(v, n)
 	}
 	for v, n := range corr {
+		//nolint:gosec // a sparse map only ever holds values clamp already bounded
 		_ = lh.corrected.RecordValues(v, n)
 	}
 }
@@ -440,6 +442,7 @@ func (lh *latencyHist) recordRaw(v int64) {
 		lh.maybePromote()
 		return
 	}
+	//nolint:gosec // the caller clamped v into the histogram bounds
 	_ = lh.hist.RecordValue(v)
 }
 
@@ -451,6 +454,7 @@ func (lh *latencyHist) recordCorrected(v int64) {
 		lh.maybePromote()
 		return
 	}
+	//nolint:gosec // the caller clamped v into the histogram bounds
 	_ = lh.corrected.RecordValue(v)
 }
 
@@ -496,9 +500,11 @@ func (lh *latencyHist) mergeInto(dst *latencyHist) {
 	}
 	if lh.isSparse() {
 		for v, n := range lh.sparseRaw {
+			//nolint:gosec // src and dst share a range, so a clamped key is in bounds
 			_ = dst.hist.RecordValues(v, n)
 		}
 		for v, n := range lh.sparseCorr {
+			//nolint:gosec // src and dst share a range, so a clamped key is in bounds
 			_ = dst.corrected.RecordValues(v, n)
 		}
 		return
