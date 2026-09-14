@@ -1,0 +1,91 @@
+name: changelog-heading
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  version-heading-first:
+    name: the release section has its heading on top
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: a version heading must come first
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+
+          # release-please inserts a new section immediately BEFORE the first
+          # existing version heading -- not after the title. So prose written in
+          # advance for the release being cut ends up ABOVE the generated
+          # heading: orphaned under "# Changelog" with no version of its own,
+          # while the new version's section holds only its generated bullet.
+          #
+          # v0.7.0 (#31), v0.8.0 (#36) and v0.9.0 (#38) each shipped this and
+          # each was repaired by hand afterwards. The v0.9.0 CHANGELOG carried an
+          # HTML comment directly above the prose describing this exact outcome
+          # and what to do about it, and it happened anyway -- a note is read at
+          # the moment the release PR is merged, and nothing makes anyone read it
+          # then. Position cannot prevent it either, because release-please
+          # always inserts before the first existing version heading, wherever
+          # the prose sits. A check is the only remedy that fires by itself.
+          #
+          # This runs ONLY on the release PR. On a feature PR the top of the file
+          # is deliberately hand-written prose with no version heading, because
+          # release-please has not run yet -- checking there would fail every one.
+          # It reports success rather than skipping, so it is safe to mark
+          # required in branch protection.
+
+          if [[ "$HEAD_REF" != release-please--branches--* ]]; then
+            echo "not the release PR (head: ${HEAD_REF:-none}); nothing to check"
+            exit 0
+          fi
+
+          title=$(head -1 CHANGELOG.md)
+          if [ "$title" != "# Changelog" ]; then
+            echo "::error::CHANGELOG.md must start with '# Changelog'; found: $title"
+            exit 1
+          fi
+
+          # First heading after the title. awk rather than `grep -m1` so no
+          # SIGPIPE reaches a producer under `pipefail`.
+          first=$(awk 'NR > 1 && /^#/ { print; exit }' CHANGELOG.md)
+
+          if [ -z "$first" ]; then
+            echo "::error::CHANGELOG.md has no headings after its title"
+            exit 1
+          fi
+
+          if [[ "$first" == '## ['* ]]; then
+            echo "ok: first heading after the title is a version heading"
+            echo "    $first"
+            exit 0
+          fi
+
+          echo "::error::CHANGELOG.md: the generated release heading is not above its prose"
+          echo
+          echo "  first heading found: $first"
+          echo "  expected:            ## [X.Y.Z](...) (YYYY-MM-DD)"
+          echo
+          cat <<'MSG'
+          release-please inserted its generated section immediately BEFORE the first
+          existing version heading, which is the BOTTOM of the prose written for this
+          release rather than the top. As it stands, that prose sits under the title
+          with no version heading of its own, and the new version's section contains
+          only its generated bullet.
+
+          Fix by moving the generated block -- the "## [X.Y.Z]" heading, its blank
+          lines, the "### Features" / "### Bug Fixes" subheadings and their bullets --
+          to the top of the prose it describes, directly beneath "# Changelog". Pure
+          reordering: do not reword anything, and do not change the version.
+
+          Then check the published release page too. GitHub release notes are written
+          once from the generated section and do NOT regenerate from a later CHANGELOG
+          fix, so they need `gh release edit vX.Y.Z --notes-file` from the corrected
+          section.
+          MSG
+          exit 1
